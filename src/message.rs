@@ -68,24 +68,24 @@ impl TaskMessage {
                     self.group_key.clone_from(group);
                 }
                 TaskOption::Unique(_) => {
-                    // TODO: Derive `unique_key` once Redis key helpers and
-                    // enqueue uniqueness behavior are modeled. Upstream builds
-                    // it from queue name, task type, and payload.
+                    // TODO: Delegate enqueue-specific metadata to `EnqueuePlan`
+                    // if `TaskMessage::from_task` becomes part of the enqueue
+                    // API. Uniqueness depends on the composed queue name.
                 }
                 TaskOption::ProcessAt(_) | TaskOption::ProcessIn(_) => {
-                    // TODO: Apply scheduling options when the enqueue path can
-                    // choose between pending, scheduled, and aggregating states.
+                    // TODO: Keep scheduling in `EnqueuePlan` unless this raw
+                    // message builder becomes an enqueue API.
                 }
             }
         }
     }
 }
 
-fn duration_seconds(duration: Duration) -> i64 {
+pub(crate) fn duration_seconds(duration: Duration) -> i64 {
     duration.as_secs().try_into().unwrap_or(i64::MAX)
 }
 
-fn unix_seconds(time: SystemTime) -> i64 {
+pub(crate) fn unix_seconds(time: SystemTime) -> i64 {
     match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => duration_seconds(duration),
         Err(error) => {
