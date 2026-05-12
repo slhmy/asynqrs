@@ -2,6 +2,9 @@
 
 ## 2026-05-12
 
+- Added Redis key helpers for queue, task, server, scheduler, uniqueness, and
+  group-related keys.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L81-L139
 - Applied supported `TaskOption` values when building `TaskMessage` from a
   `Task`, including queue, task id, retry count, timeout, deadline, retention,
   and group metadata.

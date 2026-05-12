@@ -1,3 +1,4 @@
+pub mod keys;
 mod message;
 mod options;
 pub mod pb;
