@@ -2,6 +2,11 @@
 
 ## 2026-05-12
 
+- Added Chinese enqueue tutorial documentation covering `Task`, `TaskOption`,
+  `EnqueuePlan`, `Client`, `Broker`, and `RedisEnqueuePlan`.
+- Updated the Task/TaskMessage notes to reflect current option storage and the
+  split between raw message construction and enqueue planning.
+- Added README links to the Chinese docs.
 - Added a pure Redis enqueue command plan that maps `EnqueuePlan` into
   queue-publishing and enqueue script calls for pending, scheduled,
   aggregating, and unique tasks.
