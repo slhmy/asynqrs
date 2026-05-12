@@ -4,6 +4,7 @@ pub mod keys;
 mod message;
 mod options;
 pub mod pb;
+mod redis_plan;
 mod state;
 mod task;
 
@@ -14,5 +15,9 @@ pub use client::{
 pub use enqueue::{DEFAULT_MAX_RETRY, DEFAULT_TIMEOUT, EnqueuePlan, EnqueuePlanError};
 pub use message::{DecodeTaskMessageError, TaskMessage};
 pub use options::TaskOption;
+pub use redis_plan::{
+    RedisArg, RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError, RedisEnqueueScript,
+    RedisScriptCall,
+};
 pub use state::{ParseTaskStateError, TaskState};
 pub use task::Task;

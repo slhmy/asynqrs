@@ -2,6 +2,12 @@
 
 ## 2026-05-12
 
+- Added a pure Redis enqueue command plan that maps `EnqueuePlan` into
+  queue-publishing and enqueue script calls for pending, scheduled,
+  aggregating, and unique tasks.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L6-L24
+- TODO: Execute `RedisEnqueuePlan` through a real Redis client and translate
+  Asynq script return codes into `BrokerError` values.
 - Added a minimal `Client` and `Broker` enqueue API that builds `EnqueuePlan`,
   generates UUID task IDs by default, forwards plans to a broker, and returns
   enqueue summaries.
