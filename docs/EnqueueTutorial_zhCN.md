@@ -136,7 +136,8 @@ unique_lock_ttl = process_delay + unique_ttl
 4. 把 plan 交给 `Broker`。
 5. 返回 `EnqueueResult`。
 
-当前还没有真实 Redis broker，所以使用者需要实现 `Broker` trait。
+当前已经有 `RedisBroker` 骨架，但还没有接真实 Redis crate。普通测试或学习时仍
+可以自己实现 `Broker` trait。
 
 ```rust
 use asynq_rs::{Broker, BrokerError, Client, EnqueuePlan, Task, TaskOption};
@@ -209,19 +210,37 @@ assert!(matches!(
 `TaskMessage` 会通过 protobuf 编码成 bytes，作为脚本参数传入。这是 Redis 中
 task body 的内容。
 
-## 6. 当前还没实现的部分
+## 6. 使用 RedisBroker 骨架
+
+`RedisBroker` 实现了 `Broker`。它接收 `EnqueuePlan`，构造 `RedisEnqueuePlan`，
+然后通过 `RedisExecutor` 执行：
+
+- `sadd(key, member)`：发布队列名。
+- `run_enqueue_script(script, keys, args)`：执行对应 enqueue 脚本。
+
+`RedisExecutor` 是当前真实 Redis client 的适配边界。接入 `redis`、`fred` 或
+连接池时，实现这个 trait 即可。
+
+脚本返回值会映射成 `BrokerError`：
+
+| 脚本结果 | 含义 |
+| --- | --- |
+| `1` | 成功 |
+| `0` | `TaskIdConflict` |
+| `-1` 且为 unique 脚本 | `DuplicateTask` |
+
+## 7. 当前还没实现的部分
 
 当前代码还没有：
 
 - 真实 Redis 连接和命令执行。
 - Lua 脚本源码注册或执行。
-- Asynq 脚本返回码到 `BrokerError` 的完整映射。
 - worker 侧取任务、执行、ack、retry、archive、complete。
 - `ResultWriter` 等 worker 执行期能力。
 
-下一步比较自然的是实现一个 `RedisBroker`：
+下一步比较自然的是实现一个具体 Redis executor：
 
-1. 接收 `EnqueuePlan`。
-2. 调用 `RedisEnqueuePlan::from_enqueue_plan`。
-3. 执行 `PublishQueue` 和 `RunScript`。
-4. 把 duplicate task、task id conflict 等 Redis 脚本结果映射成 `BrokerError`。
+1. 选择同步或异步 Redis crate。
+2. 加载或内嵌 upstream-compatible Lua 脚本。
+3. 实现 `RedisExecutor`。
+4. 用真实 Redis 集成测试验证 key、参数和错误映射。

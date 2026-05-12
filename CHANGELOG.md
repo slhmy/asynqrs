@@ -2,6 +2,14 @@
 
 ## 2026-05-12
 
+- Added `RedisExecutor` and `RedisBroker` skeletons that execute
+  `RedisEnqueuePlan` operations through an abstract Redis executor and map
+  enqueue script return codes to `BrokerError`.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L145
+- TODO: Back `RedisExecutor` with a concrete Redis client and load/run the
+  upstream-compatible Lua scripts.
+- Updated the enqueue tutorial with the `RedisBroker` and `RedisExecutor`
+  boundary.
 - Added Chinese enqueue tutorial documentation covering `Task`, `TaskOption`,
   `EnqueuePlan`, `Client`, `Broker`, and `RedisEnqueuePlan`.
 - Updated the Task/TaskMessage notes to reflect current option storage and the
