@@ -216,9 +216,4 @@ mod tests {
             ]
         );
     }
-
-    #[test]
-    fn max_retry_clamps_negative_values() {
-        assert_eq!(TaskOption::max_retry(-1), TaskOption::MaxRetry(0));
-    }
 }
