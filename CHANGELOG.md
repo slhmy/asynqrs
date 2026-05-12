@@ -2,12 +2,17 @@
 
 ## 2026-05-12
 
+- Added a minimal `Client` and `Broker` enqueue API that builds `EnqueuePlan`,
+  generates UUID task IDs by default, forwards plans to a broker, and returns
+  enqueue summaries.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/client.go#L266-L331
+- TODO: Implement a Redis-backed `Broker` that maps `EnqueuePlan` into Asynq's
+  pending, scheduled, unique, and aggregation Redis operations.
 - Added a pure `EnqueuePlan` model that composes task and enqueue options,
   applies upstream defaults, derives unique keys, and selects pending,
   scheduled, or aggregating state before any Redis implementation exists.
   Reference: https://github.com/hibiken/asynq/blob/v0.26.0/client.go#L217-L331
-- TODO: Wire `EnqueuePlan` into a Redis client/broker layer and replace the
-  caller-supplied generated task id with a UUID generator.
+- TODO: Wire `EnqueuePlan` into a Redis-backed broker layer.
 - Added Redis key helpers for queue, task, server, scheduler, uniqueness, and
   group-related keys.
   Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L81-L139
@@ -21,7 +26,7 @@
 - Added `TaskOption` and task option storage based on Asynq v0.26.0 enqueue
   options.
   Reference: https://github.com/hibiken/asynq/blob/v0.26.0/client.go#L47-L163
-- TODO: Apply task options to enqueue metadata once Redis enqueue behavior is
+- TODO: Execute task option metadata against Redis once a Redis-backed broker is
   implemented.
 - Moved task option definitions into `src/options.rs` so task data and option
   modeling stay in separate modules.

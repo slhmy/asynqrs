@@ -1,3 +1,4 @@
+mod client;
 mod enqueue;
 pub mod keys;
 mod message;
@@ -6,6 +7,10 @@ pub mod pb;
 mod state;
 mod task;
 
+pub use client::{
+    Broker, BrokerError, Client, ClientError, Clock, EnqueueResult, SystemClock, TaskIdGenerator,
+    UuidTaskIdGenerator,
+};
 pub use enqueue::{DEFAULT_MAX_RETRY, DEFAULT_TIMEOUT, EnqueuePlan, EnqueuePlanError};
 pub use message::{DecodeTaskMessageError, TaskMessage};
 pub use options::TaskOption;
