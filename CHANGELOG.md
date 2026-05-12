@@ -2,6 +2,12 @@
 
 ## 2026-05-12
 
+- Applied supported `TaskOption` values when building `TaskMessage` from a
+  `Task`, including queue, task id, retry count, timeout, deadline, retention,
+  and group metadata.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/client.go#L295-L324
+- TODO: Derive `unique_key` and apply scheduling options once Redis enqueue
+  state selection and key helpers are implemented.
 - Added `TaskOption` and task option storage based on Asynq v0.26.0 enqueue
   options.
   Reference: https://github.com/hibiken/asynq/blob/v0.26.0/client.go#L47-L163
