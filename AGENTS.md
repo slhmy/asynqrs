@@ -68,3 +68,7 @@ buf lint
 cargo fmt --check
 cargo test
 ```
+
+## Docs
+
+Belong with the project moving forward, check if tutorials under `docs/` need to be updated or added to reflect new features or changes.
