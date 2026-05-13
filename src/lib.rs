@@ -19,7 +19,10 @@ pub use enqueue::{DEFAULT_MAX_RETRY, DEFAULT_TIMEOUT, EnqueuePlan, EnqueuePlanEr
 pub use message::{DecodeTaskMessageError, TaskMessage};
 pub use options::TaskOption;
 pub use redis_broker::{RedisBroker, RedisBrokerError, RedisExecutor, RedisExecutorError};
-pub use redis_executor::{RedisCommandExecutor, RedisConnectionExecutor};
+pub use redis_executor::{
+    RedisClientExecutor, RedisCommandExecutor, RedisConnectionExecutor, RedisConnectionProvider,
+    RedisConnectionProviderExecutor,
+};
 pub use redis_plan::{
     RedisArg, RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError, RedisEnqueueScript,
     RedisScriptCall,

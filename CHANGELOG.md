@@ -2,6 +2,12 @@
 
 ## 2026-05-13
 
+- Added `RedisConnectionProvider` and `RedisConnectionProviderExecutor`, plus
+  the `RedisClientExecutor` convenience alias for enqueueing through a
+  redis-rs `Client`.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735
+- Updated the enqueue tutorial to reflect the current synchronous Redis client
+  adapters and the remaining connection-pool gap.
 - Added ignored Redis integration tests for pending, scheduled, unique, and
   group enqueue paths using `ASYNQ_RS_REDIS_URL`.
   Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735

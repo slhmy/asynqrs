@@ -6,7 +6,12 @@
 
 1. `Task` / `TaskOption`：用户想提交什么任务。
 2. `EnqueuePlan`：这个任务应该以什么元数据和状态入队。
-3. `RedisEnqueuePlan`：如果要写 Redis，应调用哪些 Asynq enqueue 脚本。
+3. `RedisEnqueuePlan`：写 Redis 时应调用哪些 Asynq enqueue 脚本。
+
+真实写入由 `RedisBroker` 执行。它可以包住一个单连接
+`RedisConnectionExecutor<C>`，也可以包住一个连接提供者
+`RedisConnectionProviderExecutor<P>`；代码里已经提供了基于 `redis::Client`
+的 `RedisClientExecutor` 便捷类型。
 
 这些实现参考 Asynq v0.26.0：
 
@@ -218,11 +223,27 @@ task body 的内容。
 - `sadd(key, member)`：发布队列名。
 - `run_enqueue_script(script, keys, args)`：执行对应 enqueue 脚本。
 
-`RedisExecutor` 是当前真实 Redis client 的适配边界。代码里已经提供了同步
-`redis` crate 的适配器：`RedisConnectionExecutor<C>`。`C` 可以是实现了
-redis-rs `ConnectionLike` 的连接类型。
+`RedisExecutor` 是真实 Redis client 的适配边界。代码里已经提供了两种同步
+`redis` crate 适配器：
 
-最小组合大致是：
+- `RedisConnectionExecutor<C>`：持有一个实现了 redis-rs `ConnectionLike`
+  的连接。
+- `RedisClientExecutor`：持有一个 `redis::Client`，每次执行 Redis 操作时
+  获取一条新连接。后续接入连接池时可以复用同样的 `RedisConnectionProvider`
+  边界。
+
+用 `redis::Client` 的最小组合大致是：
+
+```rust,no_run
+use asynq_rs::{Client, RedisBroker, RedisClientExecutor};
+
+let redis_client = redis::Client::open("redis://127.0.0.1/").unwrap();
+let executor = RedisClientExecutor::new(redis_client);
+let broker = RedisBroker::new(executor);
+let mut client = Client::new(broker);
+```
+
+如果已经手动持有连接，也可以使用单连接执行器：
 
 ```rust,no_run
 use asynq_rs::{Client, RedisBroker, RedisConnectionExecutor};
@@ -256,13 +277,14 @@ let mut client = Client::new(broker);
 当前代码还没有：
 
 - 异步 Redis executor。
-- Redis 连接池封装。
+- Redis 连接池封装。当前已有 `RedisConnectionProvider` 边界，可以给池类型
+  实现该 trait。
 - 自动启动 Redis 的测试环境，现有 Redis 集成测试需要手动提供
   `ASYNQ_RS_REDIS_URL`。
 - worker 侧取任务、执行、ack、retry、archive、complete。
 - `ResultWriter` 等 worker 执行期能力。
 
-下一步比较自然的是补自动化 Redis 测试环境或连接池适配：
+下一步比较自然的是补自动化 Redis 测试环境、真正连接池适配，或 worker 侧生命周期：
 
 当前已有 ignored 集成测试，可以这样运行：
 
@@ -273,5 +295,5 @@ ASYNQ_RS_REDIS_URL=redis://127.0.0.1/ cargo test --test redis_enqueue -- --ignor
 这些测试覆盖 pending、scheduled、unique 和 group 入队路径。后续可以继续补：
 
 1. testcontainers 或其他自动 Redis 启动方式。
-2. async runtime 和连接池适配。
+2. async runtime 和连接池实现。
 3. worker 侧 dequeue、ack、retry、archive、complete。
