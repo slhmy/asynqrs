@@ -218,8 +218,21 @@ task body 的内容。
 - `sadd(key, member)`：发布队列名。
 - `run_enqueue_script(script, keys, args)`：执行对应 enqueue 脚本。
 
-`RedisExecutor` 是当前真实 Redis client 的适配边界。接入 `redis`、`fred` 或
-连接池时，实现这个 trait 即可。
+`RedisExecutor` 是当前真实 Redis client 的适配边界。代码里已经提供了同步
+`redis` crate 的适配器：`RedisConnectionExecutor<C>`。`C` 可以是实现了
+redis-rs `ConnectionLike` 的连接类型。
+
+最小组合大致是：
+
+```rust,no_run
+use asynq_rs::{Client, RedisBroker, RedisConnectionExecutor};
+
+let redis_client = redis::Client::open("redis://127.0.0.1/").unwrap();
+let connection = redis_client.get_connection().unwrap();
+let executor = RedisConnectionExecutor::new(connection);
+let broker = RedisBroker::new(executor);
+let mut client = Client::new(broker);
+```
 
 每个 `RedisEnqueueScript` 都可以查询脚本元数据：
 
@@ -242,15 +255,15 @@ task body 的内容。
 
 当前代码还没有：
 
-- 真实 Redis 连接和命令执行。
-- Lua 脚本注册或执行。
+- 异步 Redis executor。
+- Redis 连接池封装。
+- 真实 Redis 集成测试。
 - worker 侧取任务、执行、ack、retry、archive、complete。
 - `ResultWriter` 等 worker 执行期能力。
 
-下一步比较自然的是实现一个具体 Redis executor：
+下一步比较自然的是补真实 Redis 集成测试或连接池适配：
 
-1. 选择同步或异步 Redis crate。
-2. 用 `RedisEnqueueScript::source()` 执行 `EVAL`，或先 `SCRIPT LOAD` 再
-   `EVALSHA`。
-3. 实现 `RedisExecutor`。
-4. 用真实 Redis 集成测试验证 key、参数和错误映射。
+1. 用本地 Redis 或 testcontainers 启动测试 Redis。
+2. 通过 `Client<RedisBroker<RedisConnectionExecutor<_>>>` 入队任务。
+3. 读取 Redis key，验证 task body、pending/scheduled/group/unique 状态。
+4. 再决定是否引入 async runtime 和连接池。

@@ -2,6 +2,13 @@
 
 ## 2026-05-13
 
+- Added a synchronous `RedisConnectionExecutor` adapter for the `redis` crate,
+  including argument conversion for enqueue scripts.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735
+- Updated the enqueue tutorial with a minimal
+  `Client<RedisBroker<RedisConnectionExecutor<_>>>` wiring example.
+- TODO: Add real Redis integration tests for pending, scheduled, group, and
+  unique enqueue paths.
 - Added fixed Asynq v0.26.0 enqueue Lua script sources and metadata for
   script names, key counts, argument counts, and return-code semantics.
   Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735
