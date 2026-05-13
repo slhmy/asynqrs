@@ -257,13 +257,21 @@ let mut client = Client::new(broker);
 
 - 异步 Redis executor。
 - Redis 连接池封装。
-- 真实 Redis 集成测试。
+- 自动启动 Redis 的测试环境，现有 Redis 集成测试需要手动提供
+  `ASYNQ_RS_REDIS_URL`。
 - worker 侧取任务、执行、ack、retry、archive、complete。
 - `ResultWriter` 等 worker 执行期能力。
 
-下一步比较自然的是补真实 Redis 集成测试或连接池适配：
+下一步比较自然的是补自动化 Redis 测试环境或连接池适配：
 
-1. 用本地 Redis 或 testcontainers 启动测试 Redis。
-2. 通过 `Client<RedisBroker<RedisConnectionExecutor<_>>>` 入队任务。
-3. 读取 Redis key，验证 task body、pending/scheduled/group/unique 状态。
-4. 再决定是否引入 async runtime 和连接池。
+当前已有 ignored 集成测试，可以这样运行：
+
+```sh
+ASYNQ_RS_REDIS_URL=redis://127.0.0.1/ cargo test --test redis_enqueue -- --ignored
+```
+
+这些测试覆盖 pending、scheduled、unique 和 group 入队路径。后续可以继续补：
+
+1. testcontainers 或其他自动 Redis 启动方式。
+2. async runtime 和连接池适配。
+3. worker 侧 dequeue、ack、retry、archive、complete。

@@ -2,20 +2,21 @@
 
 ## 2026-05-13
 
+- Added ignored Redis integration tests for pending, scheduled, unique, and
+  group enqueue paths using `ASYNQ_RS_REDIS_URL`.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735
+- TODO: Add an automated Redis test harness so these integration tests can run
+  without a pre-existing local Redis service.
 - Added a synchronous `RedisConnectionExecutor` adapter for the `redis` crate,
   including argument conversion for enqueue scripts.
   Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735
 - Updated the enqueue tutorial with a minimal
   `Client<RedisBroker<RedisConnectionExecutor<_>>>` wiring example.
-- TODO: Add real Redis integration tests for pending, scheduled, group, and
-  unique enqueue paths.
 - Added fixed Asynq v0.26.0 enqueue Lua script sources and metadata for
   script names, key counts, argument counts, and return-code semantics.
   Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735
 - Added Redis script call validation and wired it into `RedisBroker` before
   executor calls.
-- TODO: Use the script sources in a concrete Redis executor via `EVAL` or
-  `SCRIPT LOAD`/`EVALSHA`.
 
 ## 2026-05-12
 
