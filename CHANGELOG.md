@@ -2,6 +2,11 @@
 
 ## 2026-05-13
 
+- Added a GitHub Actions CI workflow that runs `buf lint`,
+  `cargo fmt --check`, and `cargo test` against a Redis 5.0 service via
+  `ASYNQ_RS_REDIS_URL`.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735
+- TODO: Broaden CI once worker-side Redis lifecycle behavior is implemented.
 - Made the Redis enqueue integration tests self-contained: they now try to
   start a Redis container with testcontainers, fall back to `ASYNQ_RS_REDIS_URL`,
   and skip cleanly when Docker is unavailable.
