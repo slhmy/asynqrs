@@ -2,7 +2,8 @@ use std::time::SystemTime;
 
 use crate::{
     Broker, BrokerError, Clock, EnqueuePlan, RedisArg, RedisEnqueueOperation, RedisEnqueuePlan,
-    RedisEnqueuePlanError, RedisEnqueueScript, RedisScriptCall, SystemClock,
+    RedisEnqueuePlanError, RedisEnqueueScript, RedisScriptCall, RedisScriptCallError,
+    RedisScriptResult, SystemClock,
 };
 
 /// Minimal executor surface needed by `RedisBroker`.
@@ -35,6 +36,7 @@ pub struct RedisExecutorError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedisBrokerError {
     Plan(RedisEnqueuePlanError),
+    ScriptCall(RedisScriptCallError),
     Executor(RedisExecutorError),
     UnexpectedScriptResult {
         script: RedisEnqueueScript,
@@ -105,6 +107,9 @@ where
                 Ok(())
             }
             RedisEnqueueOperation::RunScript(call) => {
+                call.validate()
+                    .map_err(RedisBrokerError::ScriptCall)
+                    .map_err(BrokerError::from)?;
                 let result = self
                     .executor
                     .run_enqueue_script(call.script(), call.keys(), call.args())
@@ -117,19 +122,15 @@ where
 }
 
 fn map_script_result(call: &RedisScriptCall, result: i64) -> Result<(), BrokerError> {
-    match (call.script(), result) {
-        (_, 1) => Ok(()),
-        (RedisEnqueueScript::Enqueue, 0)
-        | (RedisEnqueueScript::Schedule, 0)
-        | (RedisEnqueueScript::AddToGroup, 0) => Err(BrokerError::TaskIdConflict),
-        (RedisEnqueueScript::EnqueueUnique, -1)
-        | (RedisEnqueueScript::ScheduleUnique, -1)
-        | (RedisEnqueueScript::AddToGroupUnique, -1) => Err(BrokerError::DuplicateTask),
-        (RedisEnqueueScript::EnqueueUnique, 0)
-        | (RedisEnqueueScript::ScheduleUnique, 0)
-        | (RedisEnqueueScript::AddToGroupUnique, 0) => Err(BrokerError::TaskIdConflict),
-        (script, result) => Err(BrokerError::from(
-            RedisBrokerError::UnexpectedScriptResult { script, result },
+    match call.script().result_for_code(result) {
+        Some(RedisScriptResult::Success) => Ok(()),
+        Some(RedisScriptResult::TaskIdConflict) => Err(BrokerError::TaskIdConflict),
+        Some(RedisScriptResult::DuplicateTask) => Err(BrokerError::DuplicateTask),
+        None => Err(BrokerError::from(
+            RedisBrokerError::UnexpectedScriptResult {
+                script: call.script(),
+                result,
+            },
         )),
     }
 }
@@ -158,6 +159,7 @@ impl std::fmt::Display for RedisBrokerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Plan(error) => write!(f, "failed to build Redis enqueue plan: {error}"),
+            Self::ScriptCall(error) => write!(f, "invalid Redis script call: {error}"),
             Self::Executor(error) => write!(f, "Redis executor failed: {error}"),
             Self::UnexpectedScriptResult { script, result } => {
                 write!(f, "unexpected {script:?} script result: {result}")
@@ -170,6 +172,7 @@ impl std::error::Error for RedisBrokerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Plan(error) => Some(error),
+            Self::ScriptCall(error) => Some(error),
             Self::Executor(error) => Some(error),
             Self::UnexpectedScriptResult { .. } => None,
         }
@@ -188,10 +191,17 @@ impl From<RedisExecutorError> for RedisBrokerError {
     }
 }
 
+impl From<RedisScriptCallError> for RedisBrokerError {
+    fn from(error: RedisScriptCallError) -> Self {
+        Self::ScriptCall(error)
+    }
+}
+
 impl From<RedisBrokerError> for BrokerError {
     fn from(error: RedisBrokerError) -> Self {
         match error {
             RedisBrokerError::Plan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::ScriptCall(error) => Self::Other(error.to_string()),
             RedisBrokerError::Executor(error) => Self::Other(error.to_string()),
             RedisBrokerError::UnexpectedScriptResult { script, result } => {
                 Self::Other(format!("unexpected {script:?} script result: {result}"))

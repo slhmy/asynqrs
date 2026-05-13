@@ -221,6 +221,15 @@ task body 的内容。
 `RedisExecutor` 是当前真实 Redis client 的适配边界。接入 `redis`、`fred` 或
 连接池时，实现这个 trait 即可。
 
+每个 `RedisEnqueueScript` 都可以查询脚本元数据：
+
+- `name()`：脚本名，例如 `enqueue_unique`。
+- `source()`：固定到 Asynq v0.26.0 的 Lua 源码。
+- `key_count()` / `arg_count()`：调用形状。
+- `result_for_code(code)`：返回码语义。
+
+`RedisBroker` 会在调用 executor 前校验 `RedisScriptCall` 的 key/arg 数量。
+
 脚本返回值会映射成 `BrokerError`：
 
 | 脚本结果 | 含义 |
@@ -234,13 +243,14 @@ task body 的内容。
 当前代码还没有：
 
 - 真实 Redis 连接和命令执行。
-- Lua 脚本源码注册或执行。
+- Lua 脚本注册或执行。
 - worker 侧取任务、执行、ack、retry、archive、complete。
 - `ResultWriter` 等 worker 执行期能力。
 
 下一步比较自然的是实现一个具体 Redis executor：
 
 1. 选择同步或异步 Redis crate。
-2. 加载或内嵌 upstream-compatible Lua 脚本。
+2. 用 `RedisEnqueueScript::source()` 执行 `EVAL`，或先 `SCRIPT LOAD` 再
+   `EVALSHA`。
 3. 实现 `RedisExecutor`。
 4. 用真实 Redis 集成测试验证 key、参数和错误映射。

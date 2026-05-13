@@ -6,6 +6,7 @@ mod options;
 pub mod pb;
 mod redis_broker;
 mod redis_plan;
+mod redis_scripts;
 mod state;
 mod task;
 
@@ -21,5 +22,6 @@ pub use redis_plan::{
     RedisArg, RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError, RedisEnqueueScript,
     RedisScriptCall,
 };
+pub use redis_scripts::{RedisScriptCallError, RedisScriptResult, RedisScriptSpec};
 pub use state::{ParseTaskStateError, TaskState};
 pub use task::Task;

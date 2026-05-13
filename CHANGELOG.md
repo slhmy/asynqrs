@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 2026-05-13
+
+- Added fixed Asynq v0.26.0 enqueue Lua script sources and metadata for
+  script names, key counts, argument counts, and return-code semantics.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735
+- Added Redis script call validation and wired it into `RedisBroker` before
+  executor calls.
+- TODO: Use the script sources in a concrete Redis executor via `EVAL` or
+  `SCRIPT LOAD`/`EVALSHA`.
+
 ## 2026-05-12
 
 - Added `RedisExecutor` and `RedisBroker` skeletons that execute
