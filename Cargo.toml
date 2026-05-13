@@ -8,3 +8,6 @@ md-5 = "0.10"
 prost = "0.13"
 redis = "1.2.1"
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+testcontainers-modules = { version = "0.15.0", features = ["blocking", "redis"] }

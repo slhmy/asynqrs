@@ -2,7 +2,7 @@
 
 这份文档按当前代码解释一次任务从用户 API 到 Redis 写入计划的完整路径。
 
-当前项目还没有真实 Redis client。现在已经实现的是三层纯模型：
+当前项目已经有同步 Redis 执行器和 Redis broker。现在入队路径分成三层：
 
 1. `Task` / `TaskOption`：用户想提交什么任务。
 2. `EnqueuePlan`：这个任务应该以什么元数据和状态入队。
@@ -12,6 +12,10 @@
 `RedisConnectionExecutor<C>`，也可以包住一个连接提供者
 `RedisConnectionProviderExecutor<P>`；代码里已经提供了基于 `redis::Client`
 的 `RedisClientExecutor` 便捷类型。
+
+Redis 集成测试默认会尝试通过 testcontainers 启动本地 Redis；如果当前环境
+没有 Docker socket，它会跳过需要 Redis 的写入用例。你也可以显式提供
+`ASYNQ_RS_REDIS_URL` 让测试连接外部 Redis。
 
 这些实现参考 Asynq v0.26.0：
 
@@ -279,17 +283,17 @@ let mut client = Client::new(broker);
 - 异步 Redis executor。
 - Redis 连接池封装。当前已有 `RedisConnectionProvider` 边界，可以给池类型
   实现该 trait。
-- 自动启动 Redis 的测试环境，现有 Redis 集成测试需要手动提供
-  `ASYNQ_RS_REDIS_URL`。
+- 完整覆盖所有 Redis 依赖场景的测试环境；当前 Redis 集成测试会优先尝试
+  testcontainers，再回退到 `ASYNQ_RS_REDIS_URL`，最后在没有 Docker 时跳过。
 - worker 侧取任务、执行、ack、retry、archive、complete。
 - `ResultWriter` 等 worker 执行期能力。
 
 下一步比较自然的是补自动化 Redis 测试环境、真正连接池适配，或 worker 侧生命周期：
 
-当前已有 ignored 集成测试，可以这样运行：
+当前已有 Redis 集成测试，可以这样运行：
 
 ```sh
-ASYNQ_RS_REDIS_URL=redis://127.0.0.1/ cargo test --test redis_enqueue -- --ignored
+cargo test --test redis_enqueue
 ```
 
 这些测试覆盖 pending、scheduled、unique 和 group 入队路径。后续可以继续补：

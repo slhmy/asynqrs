@@ -6,6 +6,10 @@ use asynq_rs::{
     RedisScriptResult, Task, TaskMessage, TaskOption, TaskState,
 };
 use redis::Commands;
+use testcontainers_modules::{
+    redis::{REDIS_PORT, Redis},
+    testcontainers::{Container, runners::SyncRunner},
+};
 
 const REDIS_URL_ENV: &str = "ASYNQ_RS_REDIS_URL";
 
@@ -13,9 +17,10 @@ const REDIS_URL_ENV: &str = "ASYNQ_RS_REDIS_URL";
 // <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735>.
 
 #[test]
-#[ignore = "requires Redis; set ASYNQ_RS_REDIS_URL=redis://127.0.0.1/ and run with --ignored"]
 fn pending_enqueue_writes_task_hash_pending_list_and_queue_set() {
-    let mut fixture = RedisFixture::new("pending");
+    let Some(mut fixture) = RedisFixture::new("pending") else {
+        return;
+    };
     let mut client = fixture.client();
     let task = Task::new_with_options(
         "email:welcome",
@@ -56,9 +61,10 @@ fn pending_enqueue_writes_task_hash_pending_list_and_queue_set() {
 }
 
 #[test]
-#[ignore = "requires Redis; set ASYNQ_RS_REDIS_URL=redis://127.0.0.1/ and run with --ignored"]
 fn scheduled_enqueue_writes_task_hash_and_scheduled_zset() {
-    let mut fixture = RedisFixture::new("scheduled");
+    let Some(mut fixture) = RedisFixture::new("scheduled") else {
+        return;
+    };
     let mut client = fixture.client();
     let task = Task::new_with_options(
         "email:welcome",
@@ -95,9 +101,10 @@ fn scheduled_enqueue_writes_task_hash_and_scheduled_zset() {
 }
 
 #[test]
-#[ignore = "requires Redis; set ASYNQ_RS_REDIS_URL=redis://127.0.0.1/ and run with --ignored"]
 fn unique_enqueue_sets_unique_key_and_rejects_duplicate() {
-    let mut fixture = RedisFixture::new("unique");
+    let Some(mut fixture) = RedisFixture::new("unique") else {
+        return;
+    };
     let mut client = fixture.client();
     let options = [
         TaskOption::queue(fixture.queue()),
@@ -134,9 +141,10 @@ fn unique_enqueue_sets_unique_key_and_rejects_duplicate() {
 }
 
 #[test]
-#[ignore = "requires Redis; set ASYNQ_RS_REDIS_URL=redis://127.0.0.1/ and run with --ignored"]
 fn group_enqueue_writes_group_zset_and_groups_set() {
-    let mut fixture = RedisFixture::new("group");
+    let Some(mut fixture) = RedisFixture::new("group") else {
+        return;
+    };
     let mut client = fixture.client();
     let task = Task::new_with_options(
         "email:welcome",
@@ -180,25 +188,30 @@ fn script_result_mapping_documents_unique_duplicate_code() {
 }
 
 struct RedisFixture {
+    _container: Option<Container<Redis>>,
+    url: String,
     connection: redis::Connection,
     queue: String,
 }
 
 impl RedisFixture {
-    fn new(name: &str) -> Self {
-        let url = std::env::var(REDIS_URL_ENV)
-            .unwrap_or_else(|_| panic!("{REDIS_URL_ENV} must be set for Redis integration tests"));
-        let client = redis::Client::open(url).unwrap();
+    fn new(name: &str) -> Option<Self> {
+        let (url, container) = redis_url()?;
+        let client = redis::Client::open(url.as_ref()).unwrap();
         let connection = client.get_connection().unwrap();
         let queue = format!("asynq-rs-test-{name}-{}", uuid::Uuid::new_v4().simple());
-        let mut fixture = Self { connection, queue };
+        let mut fixture = Self {
+            _container: container,
+            url,
+            connection,
+            queue,
+        };
         fixture.cleanup();
-        fixture
+        Some(fixture)
     }
 
     fn client(&self) -> Client<RedisBroker<RedisConnectionExecutor<redis::Connection>>> {
-        let url = std::env::var(REDIS_URL_ENV).unwrap();
-        let redis_client = redis::Client::open(url).unwrap();
+        let redis_client = redis::Client::open(self.url.as_ref()).unwrap();
         let connection = redis_client.get_connection().unwrap();
         let executor = RedisConnectionExecutor::new(connection);
         Client::new(RedisBroker::new(executor))
@@ -260,4 +273,37 @@ fn string_field(fields: &HashMap<String, Vec<u8>>, name: &str) -> String {
 
 fn decode_msg(data: &[u8]) -> TaskMessage {
     TaskMessage::decode_from_slice(data).unwrap()
+}
+
+fn redis_url() -> Option<(String, Option<Container<Redis>>)> {
+    if let Ok(url) = std::env::var(REDIS_URL_ENV) {
+        return Some((url, None));
+    }
+
+    let container = match Redis::default().start() {
+        Ok(container) => container,
+        Err(error) => {
+            eprintln!(
+                "skipping Redis integration test: set {REDIS_URL_ENV} or make Docker available ({error})"
+            );
+            return None;
+        }
+    };
+    let host = match container.get_host() {
+        Ok(host) => host,
+        Err(error) => {
+            eprintln!(
+                "skipping Redis integration test: failed to resolve container host ({error})"
+            );
+            return None;
+        }
+    };
+    let port = match container.get_host_port_ipv4(REDIS_PORT) {
+        Ok(port) => port,
+        Err(error) => {
+            eprintln!("skipping Redis integration test: failed to resolve Redis port ({error})");
+            return None;
+        }
+    };
+    Some((format!("redis://{host}:{port}"), Some(container)))
 }

@@ -2,6 +2,15 @@
 
 ## 2026-05-13
 
+- Made the Redis enqueue integration tests self-contained: they now try to
+  start a Redis container with testcontainers, fall back to `ASYNQ_RS_REDIS_URL`,
+  and skip cleanly when Docker is unavailable.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735
+- Updated the enqueue tutorial to describe the current Redis test harness and
+  the `ASYNQ_RS_REDIS_URL` fallback.
+- TODO: Add a fully Docker-backed CI job so the Redis integration tests always
+  exercise a real Redis instance in automation.
+
 - Added `RedisConnectionProvider` and `RedisConnectionProviderExecutor`, plus
   the `RedisClientExecutor` convenience alias for enqueueing through a
   redis-rs `Client`.
