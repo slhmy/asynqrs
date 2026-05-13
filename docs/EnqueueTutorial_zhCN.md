@@ -185,7 +185,7 @@ assert_eq!(result.queue(), "critical");
 每个计划包含：
 
 1. `PublishQueue`：把队列名加入 `asynq:queues`。
-2. `RunScript`：调用一个 upstream enqueue Lua 脚本。
+2. `EvalScript`：调用一个 upstream enqueue Lua 脚本。
 
 示例：
 
@@ -225,7 +225,7 @@ task body 的内容。
 然后通过 `RedisExecutor` 执行：
 
 - `sadd(key, member)`：发布队列名。
-- `run_enqueue_script(script, keys, args)`：执行对应 enqueue 脚本。
+- `eval_script_int(call)`：执行返回整数状态码的 enqueue 脚本调用。
 
 `RedisExecutor` 是真实 Redis client 的适配边界。代码里已经提供了两种同步
 `redis` crate 适配器：
@@ -259,7 +259,7 @@ let broker = RedisBroker::new(executor);
 let mut client = Client::new(broker);
 ```
 
-每个 `RedisEnqueueScript` 都可以查询脚本元数据：
+每个 `RedisScript` 都可以查询脚本元数据：
 
 - `name()`：脚本名，例如 `enqueue_unique`。
 - `source()`：固定到 Asynq v0.26.0 的 Lua 源码。

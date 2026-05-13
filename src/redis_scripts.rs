@@ -1,12 +1,12 @@
-use crate::{RedisArg, RedisEnqueueScript, RedisScriptCall};
+use crate::{RedisArg, RedisScript, RedisScriptCall};
 
-/// Metadata and source for Asynq enqueue Lua scripts.
+/// Metadata and source for Asynq task lifecycle Lua scripts.
 ///
-/// Reference: Asynq v0.26.0 enqueue-related Lua scripts:
+/// Reference: Asynq v0.26.0 task lifecycle Lua scripts:
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735>.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RedisScriptSpec {
-    script: RedisEnqueueScript,
+    script: RedisScript,
     name: &'static str,
     source: &'static str,
     key_count: usize,
@@ -23,25 +23,26 @@ pub enum RedisScriptResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedisScriptCallError {
     WrongKeyCount {
-        script: RedisEnqueueScript,
+        script: RedisScript,
         expected: usize,
         actual: usize,
     },
     WrongArgCount {
-        script: RedisEnqueueScript,
+        script: RedisScript,
         expected: usize,
         actual: usize,
     },
 }
 
-impl RedisEnqueueScript {
-    pub const ALL: [Self; 6] = [
+impl RedisScript {
+    pub const ALL: [Self; 7] = [
         Self::Enqueue,
         Self::EnqueueUnique,
         Self::Schedule,
         Self::ScheduleUnique,
         Self::AddToGroup,
         Self::AddToGroupUnique,
+        Self::Dequeue,
     ];
 
     pub const fn spec(self) -> RedisScriptSpec {
@@ -87,6 +88,13 @@ impl RedisEnqueueScript {
                 source: ADD_TO_GROUP_UNIQUE_SOURCE,
                 key_count: 4,
                 arg_count: 5,
+            },
+            Self::Dequeue => RedisScriptSpec {
+                script: self,
+                name: "dequeue",
+                source: DEQUEUE_SOURCE,
+                key_count: 5,
+                arg_count: 1,
             },
         }
     }
@@ -154,7 +162,7 @@ impl RedisScriptCall {
 }
 
 impl RedisScriptSpec {
-    pub const fn script(self) -> RedisEnqueueScript {
+    pub const fn script(self) -> RedisScript {
         self.script
     }
 
@@ -294,6 +302,22 @@ redis.call("SADD", KEYS[3], ARGV[4])
 return 1
 "#;
 
+// Source: Asynq v0.26.0 `dequeueCmd`.
+const DEQUEUE_SOURCE: &str = r#"
+if redis.call("EXISTS", KEYS[5]) == 1 then
+  return nil
+end
+local id = redis.call("RPOPLPUSH", KEYS[1], KEYS[2])
+if id then
+  local key = KEYS[4] .. id
+  redis.call("HSET", key, "state", "active")
+  redis.call("HDEL", key, "pending_since")
+  redis.call("ZADD", KEYS[3], ARGV[1], id)
+  return redis.call("HGET", key, "msg")
+end
+return nil
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,17 +328,13 @@ mod tests {
     #[test]
     fn scripts_have_sources_and_shapes() {
         let expected = [
-            (RedisEnqueueScript::Enqueue, "enqueue", 2, 3),
-            (RedisEnqueueScript::EnqueueUnique, "enqueue_unique", 3, 4),
-            (RedisEnqueueScript::Schedule, "schedule", 2, 3),
-            (RedisEnqueueScript::ScheduleUnique, "schedule_unique", 3, 4),
-            (RedisEnqueueScript::AddToGroup, "add_to_group", 3, 4),
-            (
-                RedisEnqueueScript::AddToGroupUnique,
-                "add_to_group_unique",
-                4,
-                5,
-            ),
+            (RedisScript::Enqueue, "enqueue", 2, 3),
+            (RedisScript::EnqueueUnique, "enqueue_unique", 3, 4),
+            (RedisScript::Schedule, "schedule", 2, 3),
+            (RedisScript::ScheduleUnique, "schedule_unique", 3, 4),
+            (RedisScript::AddToGroup, "add_to_group", 3, 4),
+            (RedisScript::AddToGroupUnique, "add_to_group_unique", 4, 5),
+            (RedisScript::Dequeue, "dequeue", 5, 1),
         ];
 
         for (script, name, key_count, arg_count) in expected {
@@ -324,23 +344,28 @@ mod tests {
             assert_eq!(spec.key_count(), key_count);
             assert_eq!(spec.arg_count(), arg_count);
             assert!(spec.source().contains("redis.call"));
-            assert!(spec.source().contains("return 1"));
+            if script == RedisScript::Dequeue {
+                assert!(spec.source().contains("return nil"));
+                assert!(spec.source().contains("HGET"));
+            } else {
+                assert!(spec.source().contains("return 1"));
+            }
         }
     }
 
     #[test]
     fn scripts_map_return_codes() {
         assert_eq!(
-            RedisEnqueueScript::Enqueue.result_for_code(1),
+            RedisScript::Enqueue.result_for_code(1),
             Some(RedisScriptResult::Success)
         );
         assert_eq!(
-            RedisEnqueueScript::Enqueue.result_for_code(0),
+            RedisScript::Enqueue.result_for_code(0),
             Some(RedisScriptResult::TaskIdConflict)
         );
-        assert_eq!(RedisEnqueueScript::Enqueue.result_for_code(-1), None);
+        assert_eq!(RedisScript::Enqueue.result_for_code(-1), None);
         assert_eq!(
-            RedisEnqueueScript::EnqueueUnique.result_for_code(-1),
+            RedisScript::EnqueueUnique.result_for_code(-1),
             Some(RedisScriptResult::DuplicateTask)
         );
     }
@@ -354,22 +379,19 @@ mod tests {
             RedisArg::I64(1),
         ];
 
+        assert_eq!(RedisScript::Enqueue.validate_call(&keys, &args), Ok(()));
         assert_eq!(
-            RedisEnqueueScript::Enqueue.validate_call(&keys, &args),
-            Ok(())
-        );
-        assert_eq!(
-            RedisEnqueueScript::Enqueue.validate_call(&keys[0..1], &args),
+            RedisScript::Enqueue.validate_call(&keys[0..1], &args),
             Err(RedisScriptCallError::WrongKeyCount {
-                script: RedisEnqueueScript::Enqueue,
+                script: RedisScript::Enqueue,
                 expected: 2,
                 actual: 1,
             })
         );
         assert_eq!(
-            RedisEnqueueScript::Enqueue.validate_call(&keys, &args[0..2]),
+            RedisScript::Enqueue.validate_call(&keys, &args[0..2]),
             Err(RedisScriptCallError::WrongArgCount {
-                script: RedisEnqueueScript::Enqueue,
+                script: RedisScript::Enqueue,
                 expected: 3,
                 actual: 2,
             })
@@ -458,7 +480,7 @@ mod tests {
 
         for plan in cases {
             let redis_plan = RedisEnqueuePlan::from_enqueue_plan(&plan, now).unwrap();
-            let RedisEnqueueOperation::RunScript(call) = &redis_plan.operations()[1] else {
+            let RedisEnqueueOperation::EvalScript(call) = &redis_plan.operations()[1] else {
                 panic!("expected script call");
             };
             call.validate().unwrap();

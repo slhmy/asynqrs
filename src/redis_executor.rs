@@ -1,12 +1,15 @@
-use crate::{RedisArg, RedisEnqueueScript, RedisExecutor, RedisExecutorError};
+use crate::{
+    RedisArg, RedisDequeueCall, RedisExecutor, RedisExecutorError, RedisScript, RedisScriptCall,
+};
 
 /// Provides a Redis connection for command execution.
 ///
 /// This is a Rust-specific adapter boundary for client or pool types. The
-/// enqueue commands it feeds are still the upstream Asynq Redis operations.
+/// task lifecycle commands it feeds are still the upstream Asynq Redis
+/// operations.
 ///
-/// Reference: Asynq v0.26.0 RDB enqueue methods use `SAdd` and redis Lua
-/// scripts to persist enqueue state:
+/// Reference: Asynq v0.26.0 RDB methods use Redis commands and Lua scripts to
+/// persist task lifecycle state:
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735>.
 pub trait RedisConnectionProvider {
     type Connection: RedisCommandExecutor;
@@ -26,8 +29,8 @@ pub type RedisClientExecutor = RedisConnectionProviderExecutor<redis::Client>;
 
 /// Synchronous Redis executor backed by a redis-rs connection-like type.
 ///
-/// Reference: Asynq v0.26.0 RDB enqueue methods use `SAdd` and redis Lua
-/// scripts to persist enqueue state:
+/// Reference: Asynq v0.26.0 RDB methods use Redis commands and Lua scripts to
+/// persist task lifecycle state:
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735>.
 #[derive(Debug, Clone)]
 pub struct RedisConnectionExecutor<C> {
@@ -39,12 +42,12 @@ pub trait RedisCommandExecutor {
 
     fn sadd(&mut self, key: &str, member: &str) -> Result<(), Self::Error>;
 
-    fn invoke_script(
+    fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, Self::Error>;
+
+    fn eval_script_bytes(
         &mut self,
-        script: RedisEnqueueScript,
-        keys: &[String],
-        args: &[RedisArg],
-    ) -> Result<i64, Self::Error>;
+        call: &RedisDequeueCall,
+    ) -> Result<Option<Vec<u8>>, Self::Error>;
 }
 
 impl<P> RedisConnectionProviderExecutor<P> {
@@ -91,13 +94,15 @@ where
         self.with_connection(|connection| connection.sadd(key, member))
     }
 
-    fn run_enqueue_script(
+    fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, RedisExecutorError> {
+        self.with_connection(|connection| connection.eval_script_int(call))
+    }
+
+    fn eval_script_bytes(
         &mut self,
-        script: RedisEnqueueScript,
-        keys: &[String],
-        args: &[RedisArg],
-    ) -> Result<i64, RedisExecutorError> {
-        self.with_connection(|connection| connection.invoke_script(script, keys, args))
+        call: &RedisDequeueCall,
+    ) -> Result<Option<Vec<u8>>, RedisExecutorError> {
+        self.with_connection(|connection| connection.eval_script_bytes(call))
     }
 }
 
@@ -129,14 +134,18 @@ where
             .map_err(redis_executor_error)
     }
 
-    fn run_enqueue_script(
-        &mut self,
-        script: RedisEnqueueScript,
-        keys: &[String],
-        args: &[RedisArg],
-    ) -> Result<i64, RedisExecutorError> {
+    fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, RedisExecutorError> {
         self.connection
-            .invoke_script(script, keys, args)
+            .eval_script_int(call)
+            .map_err(redis_executor_error)
+    }
+
+    fn eval_script_bytes(
+        &mut self,
+        call: &RedisDequeueCall,
+    ) -> Result<Option<Vec<u8>>, RedisExecutorError> {
+        self.connection
+            .eval_script_bytes(call)
             .map_err(redis_executor_error)
     }
 }
@@ -161,22 +170,36 @@ where
         Ok(())
     }
 
-    fn invoke_script(
-        &mut self,
-        script: RedisEnqueueScript,
-        keys: &[String],
-        args: &[RedisArg],
-    ) -> Result<i64, Self::Error> {
-        let redis_script = redis::Script::new(script.source());
-        let mut invocation = redis_script.prepare_invoke();
-        for key in keys {
-            invocation.key(key);
-        }
-        for arg in args {
-            push_arg(&mut invocation, arg);
-        }
-        invocation.invoke(self)
+    fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, Self::Error> {
+        eval_script(self, call.script(), call.keys(), call.args())
     }
+
+    fn eval_script_bytes(
+        &mut self,
+        call: &RedisDequeueCall,
+    ) -> Result<Option<Vec<u8>>, Self::Error> {
+        eval_script(self, call.script(), call.keys(), call.args())
+    }
+}
+
+fn eval_script<T>(
+    connection: &mut impl redis::ConnectionLike,
+    script: RedisScript,
+    keys: &[String],
+    args: &[RedisArg],
+) -> Result<T, redis::RedisError>
+where
+    T: redis::FromRedisValue,
+{
+    let redis_script = redis::Script::new(script.source());
+    let mut invocation = redis_script.prepare_invoke();
+    for key in keys {
+        invocation.key(key);
+    }
+    for arg in args {
+        push_arg(&mut invocation, arg);
+    }
+    invocation.invoke(connection)
 }
 
 fn push_arg(invocation: &mut redis::ScriptInvocation<'_>, arg: &RedisArg) {
@@ -200,14 +223,18 @@ fn redis_executor_error(error: impl std::fmt::Display) -> RedisExecutorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RedisDequeuePlan;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::time::{Duration, UNIX_EPOCH};
 
     #[derive(Debug, Default)]
     struct FakeConnection {
         sadd_calls: Vec<(String, String)>,
-        script_calls: Vec<(RedisEnqueueScript, Vec<String>, Vec<RedisArg>)>,
-        script_results: Vec<i64>,
+        script_int_calls: Vec<(RedisScript, Vec<String>, Vec<RedisArg>)>,
+        script_bytes_calls: Vec<(RedisScript, Vec<String>, Vec<RedisArg>)>,
+        script_int_results: Vec<i64>,
+        script_bytes_results: Vec<Option<Vec<u8>>>,
         sadd_error: Option<String>,
         script_error: Option<String>,
     }
@@ -226,18 +253,28 @@ mod tests {
             Ok(())
         }
 
-        fn invoke_script(
-            &mut self,
-            script: RedisEnqueueScript,
-            keys: &[String],
-            args: &[RedisArg],
-        ) -> Result<i64, Self::Error> {
-            self.script_calls
-                .push((script, keys.to_vec(), args.to_vec()));
+        fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, Self::Error> {
+            self.script_int_calls
+                .push((call.script(), call.keys().to_vec(), call.args().to_vec()));
             if let Some(error) = &self.script_error {
                 return Err(FakeError(error.clone()));
             }
-            Ok(self.script_results.pop().unwrap_or(1))
+            Ok(self.script_int_results.pop().unwrap_or(1))
+        }
+
+        fn eval_script_bytes(
+            &mut self,
+            call: &RedisDequeueCall,
+        ) -> Result<Option<Vec<u8>>, Self::Error> {
+            self.script_bytes_calls.push((
+                call.script(),
+                call.keys().to_vec(),
+                call.args().to_vec(),
+            ));
+            if let Some(error) = &self.script_error {
+                return Err(FakeError(error.clone()));
+            }
+            Ok(self.script_bytes_results.pop().unwrap_or(None))
         }
     }
 
@@ -260,9 +297,9 @@ mod tests {
     }
 
     #[test]
-    fn forwards_script_invocation_to_connection() {
+    fn forwards_integer_script_eval_to_connection() {
         let mut executor = RedisConnectionExecutor::new(FakeConnection {
-            script_results: vec![1],
+            script_int_results: vec![1],
             ..FakeConnection::default()
         });
         let keys = vec![
@@ -274,15 +311,39 @@ mod tests {
             RedisArg::String("task-id".to_owned()),
             RedisArg::I64(1_700_000_000),
         ];
+        let call = RedisScriptCall::new(RedisScript::Enqueue, keys, args);
 
-        let result = executor
-            .run_enqueue_script(RedisEnqueueScript::Enqueue, &keys, &args)
-            .unwrap();
+        let result = executor.eval_script_int(&call).unwrap();
 
         assert_eq!(result, 1);
         assert_eq!(
-            executor.connection().script_calls,
-            [(RedisEnqueueScript::Enqueue, keys, args)]
+            executor.connection().script_int_calls,
+            [(
+                RedisScript::Enqueue,
+                call.keys().to_vec(),
+                call.args().to_vec()
+            )]
+        );
+    }
+
+    #[test]
+    fn forwards_byte_script_eval_to_connection() {
+        let mut executor = RedisConnectionExecutor::new(FakeConnection {
+            script_bytes_results: vec![Some(b"message".to_vec())],
+            ..FakeConnection::default()
+        });
+        let call = dequeue_call();
+
+        let result = executor.eval_script_bytes(&call).unwrap();
+
+        assert_eq!(result, Some(b"message".to_vec()));
+        assert_eq!(
+            executor.connection().script_bytes_calls,
+            [(
+                RedisScript::Dequeue,
+                call.keys().to_vec(),
+                call.args().to_vec()
+            )]
         );
     }
 
@@ -305,8 +366,13 @@ mod tests {
             key: String,
             member: String,
         },
-        InvokeScript {
-            script: RedisEnqueueScript,
+        EvalScriptInt {
+            script: RedisScript,
+            keys: Vec<String>,
+            args: Vec<RedisArg>,
+        },
+        EvalScriptBytes {
+            script: RedisScript,
             keys: Vec<String>,
             args: Vec<RedisArg>,
         },
@@ -317,14 +383,16 @@ mod tests {
         calls: Rc<RefCell<Vec<ProviderCall>>>,
         connection_error: Option<String>,
         command_error: Option<String>,
-        script_results: Rc<RefCell<Vec<i64>>>,
+        script_int_results: Rc<RefCell<Vec<i64>>>,
+        script_bytes_results: Rc<RefCell<Vec<Option<Vec<u8>>>>>,
     }
 
     #[derive(Debug)]
     struct FakeProviderConnection {
         calls: Rc<RefCell<Vec<ProviderCall>>>,
         command_error: Option<String>,
-        script_results: Rc<RefCell<Vec<i64>>>,
+        script_int_results: Rc<RefCell<Vec<i64>>>,
+        script_bytes_results: Rc<RefCell<Vec<Option<Vec<u8>>>>>,
     }
 
     impl RedisConnectionProvider for FakeProvider {
@@ -339,7 +407,8 @@ mod tests {
             Ok(FakeProviderConnection {
                 calls: Rc::clone(&self.calls),
                 command_error: self.command_error.clone(),
-                script_results: Rc::clone(&self.script_results),
+                script_int_results: Rc::clone(&self.script_int_results),
+                script_bytes_results: Rc::clone(&self.script_bytes_results),
             })
         }
     }
@@ -358,28 +427,38 @@ mod tests {
             Ok(())
         }
 
-        fn invoke_script(
-            &mut self,
-            script: RedisEnqueueScript,
-            keys: &[String],
-            args: &[RedisArg],
-        ) -> Result<i64, Self::Error> {
-            self.calls.borrow_mut().push(ProviderCall::InvokeScript {
-                script,
-                keys: keys.to_vec(),
-                args: args.to_vec(),
+        fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, Self::Error> {
+            self.calls.borrow_mut().push(ProviderCall::EvalScriptInt {
+                script: call.script(),
+                keys: call.keys().to_vec(),
+                args: call.args().to_vec(),
             });
             if let Some(error) = &self.command_error {
                 return Err(FakeError(error.clone()));
             }
-            Ok(self.script_results.borrow_mut().pop().unwrap_or(1))
+            Ok(self.script_int_results.borrow_mut().pop().unwrap_or(1))
+        }
+
+        fn eval_script_bytes(
+            &mut self,
+            call: &RedisDequeueCall,
+        ) -> Result<Option<Vec<u8>>, Self::Error> {
+            self.calls.borrow_mut().push(ProviderCall::EvalScriptBytes {
+                script: call.script(),
+                keys: call.keys().to_vec(),
+                args: call.args().to_vec(),
+            });
+            if let Some(error) = &self.command_error {
+                return Err(FakeError(error.clone()));
+            }
+            Ok(self.script_bytes_results.borrow_mut().pop().unwrap_or(None))
         }
     }
 
     #[test]
     fn provider_executor_fetches_connection_for_each_operation() {
         let provider = FakeProvider {
-            script_results: Rc::new(RefCell::new(vec![1])),
+            script_int_results: Rc::new(RefCell::new(vec![1])),
             ..FakeProvider::default()
         };
         let calls = Rc::clone(&provider.calls);
@@ -393,11 +472,10 @@ mod tests {
             RedisArg::String("task-id".to_owned()),
             RedisArg::I64(1_700_000_000),
         ];
+        let call = RedisScriptCall::new(RedisScript::Enqueue, keys, args);
 
         executor.sadd("asynq:queues", "critical").unwrap();
-        let result = executor
-            .run_enqueue_script(RedisEnqueueScript::Enqueue, &keys, &args)
-            .unwrap();
+        let result = executor.eval_script_int(&call).unwrap();
 
         assert_eq!(result, 1);
         assert_eq!(
@@ -409,10 +487,36 @@ mod tests {
                     member: "critical".to_owned()
                 },
                 ProviderCall::GetConnection,
-                ProviderCall::InvokeScript {
-                    script: RedisEnqueueScript::Enqueue,
-                    keys,
-                    args
+                ProviderCall::EvalScriptInt {
+                    script: RedisScript::Enqueue,
+                    keys: call.keys().to_vec(),
+                    args: call.args().to_vec()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_executor_evals_byte_script() {
+        let provider = FakeProvider {
+            script_bytes_results: Rc::new(RefCell::new(vec![Some(b"message".to_vec())])),
+            ..FakeProvider::default()
+        };
+        let calls = Rc::clone(&provider.calls);
+        let mut executor = RedisConnectionProviderExecutor::new(provider);
+        let call = dequeue_call();
+
+        let result = executor.eval_script_bytes(&call).unwrap();
+
+        assert_eq!(result, Some(b"message".to_vec()));
+        assert_eq!(
+            *calls.borrow(),
+            [
+                ProviderCall::GetConnection,
+                ProviderCall::EvalScriptBytes {
+                    script: RedisScript::Dequeue,
+                    keys: call.keys().to_vec(),
+                    args: call.args().to_vec()
                 }
             ]
         );
@@ -442,5 +546,13 @@ mod tests {
         let error = executor.sadd("asynq:queues", "critical").unwrap_err();
 
         assert_eq!(error.message(), "command failed");
+    }
+
+    fn dequeue_call() -> RedisDequeueCall {
+        let queues = vec!["critical".to_owned()];
+        RedisDequeuePlan::from_queues(&queues, UNIX_EPOCH + Duration::from_secs(1_700_000_000))
+            .unwrap()
+            .queue_calls()[0]
+            .clone()
     }
 }

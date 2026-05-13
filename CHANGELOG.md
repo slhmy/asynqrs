@@ -2,6 +2,21 @@
 
 ## 2026-05-13
 
+- Cleaned up Redis script naming now that the script catalog covers more than
+  enqueue: `RedisScript` is now the public enum name.
+- Renamed low-level script execution methods from enqueue/dequeue-specific
+  wording to return-type-oriented `eval_script_int` and `eval_script_bytes`.
+  No Redis behavior changed.
+- Added the first worker-side dequeue model: `DequeuedTask`,
+  `DequeueBroker`, `DequeueError`, and `RedisBroker::dequeue`.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L243-L274
+- Added `RedisDequeuePlan`, the fixed Asynq dequeue Lua script, executor
+  support for optional message-byte script results, and Redis integration
+  coverage for pending-to-active lease movement.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L46-L52
+- Added worker dequeue documentation and linked it from the README.
+- TODO: Add ack, retry, archive, lease extension, and expired lease recovery
+  once the worker lifecycle is modeled.
 - Added a GitHub Actions CI workflow that runs `buf lint`,
   `cargo fmt --check`, and `cargo test` against a Redis 5.0 service via
   `ASYNQ_RS_REDIS_URL`.
@@ -13,8 +28,8 @@
   Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735
 - Updated the enqueue tutorial to describe the current Redis test harness and
   the `ASYNQ_RS_REDIS_URL` fallback.
-- TODO: Add a fully Docker-backed CI job so the Redis integration tests always
-  exercise a real Redis instance in automation.
+- TODO: Keep CI Redis coverage enabled as worker-side lifecycle operations are
+  added.
 
 - Added `RedisConnectionProvider` and `RedisConnectionProviderExecutor`, plus
   the `RedisClientExecutor` convenience alias for enqueueing through a
@@ -25,8 +40,8 @@
 - Added ignored Redis integration tests for pending, scheduled, unique, and
   group enqueue paths using `ASYNQ_RS_REDIS_URL`.
   Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735
-- TODO: Add an automated Redis test harness so these integration tests can run
-  without a pre-existing local Redis service.
+- TODO: Extend the automated Redis harness as non-enqueue lifecycle operations
+  are added.
 - Added a synchronous `RedisConnectionExecutor` adapter for the `redis` crate,
   including argument conversion for enqueue scripts.
   Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735

@@ -1,25 +1,26 @@
 use std::time::SystemTime;
 
 use crate::{
-    Broker, BrokerError, Clock, EnqueuePlan, RedisArg, RedisEnqueueOperation, RedisEnqueuePlan,
-    RedisEnqueuePlanError, RedisEnqueueScript, RedisScriptCall, RedisScriptCallError,
-    RedisScriptResult, SystemClock,
+    Broker, BrokerError, Clock, DecodeTaskMessageError, DequeueBroker, DequeueError, DequeuedTask,
+    EnqueuePlan, RedisDequeueCall, RedisDequeuePlan, RedisDequeuePlanError, RedisEnqueueOperation,
+    RedisEnqueuePlan, RedisEnqueuePlanError, RedisScript, RedisScriptCall, RedisScriptCallError,
+    RedisScriptResult, SystemClock, TaskMessage,
 };
 
 /// Minimal executor surface needed by `RedisBroker`.
 ///
-/// Reference: Asynq v0.26.0 RDB enqueue methods execute a queue publication
-/// plus an enqueue Lua script:
-/// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L145>.
+/// Reference: Asynq v0.26.0 RDB methods combine Redis commands with Lua
+/// scripts for task lifecycle state changes:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735>.
 pub trait RedisExecutor {
     fn sadd(&mut self, key: &str, member: &str) -> Result<(), RedisExecutorError>;
 
-    fn run_enqueue_script(
+    fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, RedisExecutorError>;
+
+    fn eval_script_bytes(
         &mut self,
-        script: RedisEnqueueScript,
-        keys: &[String],
-        args: &[RedisArg],
-    ) -> Result<i64, RedisExecutorError>;
+        call: &RedisDequeueCall,
+    ) -> Result<Option<Vec<u8>>, RedisExecutorError>;
 }
 
 #[derive(Debug, Clone)]
@@ -33,15 +34,14 @@ pub struct RedisExecutorError {
     message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum RedisBrokerError {
     Plan(RedisEnqueuePlanError),
+    DequeuePlan(RedisDequeuePlanError),
     ScriptCall(RedisScriptCallError),
     Executor(RedisExecutorError),
-    UnexpectedScriptResult {
-        script: RedisEnqueueScript,
-        result: i64,
-    },
+    Decode(DecodeTaskMessageError),
+    UnexpectedScriptResult { script: RedisScript, result: i64 },
 }
 
 impl<E> RedisBroker<E, SystemClock> {
@@ -78,6 +78,16 @@ where
     }
 }
 
+impl<E, C> DequeueBroker for RedisBroker<E, C>
+where
+    E: RedisExecutor,
+    C: Clock,
+{
+    fn dequeue(&mut self, queues: &[String]) -> Result<DequeuedTask, DequeueError> {
+        self.dequeue_with_now(queues, self.clock.now())
+    }
+}
+
 impl<E, C> RedisBroker<E, C>
 where
     E: RedisExecutor,
@@ -106,18 +116,49 @@ where
                     .map_err(BrokerError::from)?;
                 Ok(())
             }
-            RedisEnqueueOperation::RunScript(call) => {
+            RedisEnqueueOperation::EvalScript(call) => {
                 call.validate()
                     .map_err(RedisBrokerError::ScriptCall)
                     .map_err(BrokerError::from)?;
                 let result = self
                     .executor
-                    .run_enqueue_script(call.script(), call.keys(), call.args())
+                    .eval_script_int(call)
                     .map_err(RedisBrokerError::Executor)
                     .map_err(BrokerError::from)?;
                 map_script_result(call, result)
             }
         }
+    }
+
+    pub fn dequeue_with_now(
+        &mut self,
+        queues: &[String],
+        now: SystemTime,
+    ) -> Result<DequeuedTask, DequeueError> {
+        let redis_plan = RedisDequeuePlan::from_queues(queues, now)
+            .map_err(RedisBrokerError::DequeuePlan)
+            .map_err(DequeueError::from)?;
+
+        for call in redis_plan.queue_calls() {
+            RedisScript::Dequeue
+                .validate_call(call.keys(), call.args())
+                .map_err(RedisBrokerError::ScriptCall)
+                .map_err(DequeueError::from)?;
+            let Some(data) = self
+                .executor
+                .eval_script_bytes(call)
+                .map_err(RedisBrokerError::Executor)
+                .map_err(DequeueError::from)?
+            else {
+                continue;
+            };
+            let message = TaskMessage::decode_from_slice(&data)
+                .map_err(RedisBrokerError::Decode)
+                .map_err(DequeueError::from)?;
+            return Ok(DequeuedTask::new(message, redis_plan.lease_expires_at()));
+        }
+
+        Err(DequeueError::NoProcessableTask)
     }
 }
 
@@ -159,8 +200,10 @@ impl std::fmt::Display for RedisBrokerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Plan(error) => write!(f, "failed to build Redis enqueue plan: {error}"),
+            Self::DequeuePlan(error) => write!(f, "failed to build Redis dequeue plan: {error}"),
             Self::ScriptCall(error) => write!(f, "invalid Redis script call: {error}"),
             Self::Executor(error) => write!(f, "Redis executor failed: {error}"),
+            Self::Decode(error) => write!(f, "failed to decode dequeued task message: {error}"),
             Self::UnexpectedScriptResult { script, result } => {
                 write!(f, "unexpected {script:?} script result: {result}")
             }
@@ -172,8 +215,10 @@ impl std::error::Error for RedisBrokerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Plan(error) => Some(error),
+            Self::DequeuePlan(error) => Some(error),
             Self::ScriptCall(error) => Some(error),
             Self::Executor(error) => Some(error),
+            Self::Decode(error) => Some(error),
             Self::UnexpectedScriptResult { .. } => None,
         }
     }
@@ -182,6 +227,12 @@ impl std::error::Error for RedisBrokerError {
 impl From<RedisEnqueuePlanError> for RedisBrokerError {
     fn from(error: RedisEnqueuePlanError) -> Self {
         Self::Plan(error)
+    }
+}
+
+impl From<RedisDequeuePlanError> for RedisBrokerError {
+    fn from(error: RedisDequeuePlanError) -> Self {
+        Self::DequeuePlan(error)
     }
 }
 
@@ -197,12 +248,35 @@ impl From<RedisScriptCallError> for RedisBrokerError {
     }
 }
 
+impl From<DecodeTaskMessageError> for RedisBrokerError {
+    fn from(error: DecodeTaskMessageError) -> Self {
+        Self::Decode(error)
+    }
+}
+
 impl From<RedisBrokerError> for BrokerError {
     fn from(error: RedisBrokerError) -> Self {
         match error {
             RedisBrokerError::Plan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::DequeuePlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::ScriptCall(error) => Self::Other(error.to_string()),
             RedisBrokerError::Executor(error) => Self::Other(error.to_string()),
+            RedisBrokerError::Decode(error) => Self::Other(error.to_string()),
+            RedisBrokerError::UnexpectedScriptResult { script, result } => {
+                Self::Other(format!("unexpected {script:?} script result: {result}"))
+            }
+        }
+    }
+}
+
+impl From<RedisBrokerError> for DequeueError {
+    fn from(error: RedisBrokerError) -> Self {
+        match error {
+            RedisBrokerError::DequeuePlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::ScriptCall(error) => Self::Other(error.to_string()),
+            RedisBrokerError::Executor(error) => Self::Other(error.to_string()),
+            RedisBrokerError::Decode(error) => Self::Other(error.to_string()),
+            RedisBrokerError::Plan(error) => Self::Other(error.to_string()),
             RedisBrokerError::UnexpectedScriptResult { script, result } => {
                 Self::Other(format!("unexpected {script:?} script result: {result}"))
             }
@@ -215,7 +289,7 @@ mod tests {
     use super::*;
     use std::time::{Duration, UNIX_EPOCH};
 
-    use crate::{Task, TaskOption, TaskState};
+    use crate::{RedisArg, Task, TaskOption, TaskState};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum ExecutorCall {
@@ -223,8 +297,13 @@ mod tests {
             key: String,
             member: String,
         },
-        RunScript {
-            script: RedisEnqueueScript,
+        EvalScriptInt {
+            script: RedisScript,
+            keys: Vec<String>,
+            args: Vec<RedisArg>,
+        },
+        EvalScriptBytes {
+            script: RedisScript,
             keys: Vec<String>,
             args: Vec<RedisArg>,
         },
@@ -233,7 +312,8 @@ mod tests {
     #[derive(Debug)]
     struct FakeExecutor {
         calls: Vec<ExecutorCall>,
-        script_results: Vec<i64>,
+        script_int_results: Vec<i64>,
+        script_bytes_results: Vec<Option<Vec<u8>>>,
         sadd_error: Option<RedisExecutorError>,
         script_error: Option<RedisExecutorError>,
     }
@@ -242,7 +322,8 @@ mod tests {
         fn default() -> Self {
             Self {
                 calls: Vec::new(),
-                script_results: vec![1],
+                script_int_results: vec![1],
+                script_bytes_results: Vec::new(),
                 sadd_error: None,
                 script_error: None,
             }
@@ -261,21 +342,31 @@ mod tests {
             Ok(())
         }
 
-        fn run_enqueue_script(
-            &mut self,
-            script: RedisEnqueueScript,
-            keys: &[String],
-            args: &[RedisArg],
-        ) -> Result<i64, RedisExecutorError> {
-            self.calls.push(ExecutorCall::RunScript {
-                script,
-                keys: keys.to_vec(),
-                args: args.to_vec(),
+        fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, RedisExecutorError> {
+            self.calls.push(ExecutorCall::EvalScriptInt {
+                script: call.script(),
+                keys: call.keys().to_vec(),
+                args: call.args().to_vec(),
             });
             if let Some(error) = self.script_error.clone() {
                 return Err(error);
             }
-            Ok(self.script_results.remove(0))
+            Ok(self.script_int_results.remove(0))
+        }
+
+        fn eval_script_bytes(
+            &mut self,
+            call: &RedisDequeueCall,
+        ) -> Result<Option<Vec<u8>>, RedisExecutorError> {
+            self.calls.push(ExecutorCall::EvalScriptBytes {
+                script: call.script(),
+                keys: call.keys().to_vec(),
+                args: call.args().to_vec(),
+            });
+            if let Some(error) = self.script_error.clone() {
+                return Err(error);
+            }
+            Ok(self.script_bytes_results.remove(0))
         }
     }
 
@@ -301,10 +392,10 @@ mod tests {
                 member: "critical".to_owned()
             }
         );
-        let ExecutorCall::RunScript { script, keys, args } = &calls[1] else {
+        let ExecutorCall::EvalScriptInt { script, keys, args } = &calls[1] else {
             panic!("expected script call");
         };
-        assert_eq!(*script, RedisEnqueueScript::Enqueue);
+        assert_eq!(*script, RedisScript::Enqueue);
         assert_eq!(
             keys,
             &[
@@ -335,10 +426,10 @@ mod tests {
 
         broker.enqueue(&plan).unwrap();
 
-        let ExecutorCall::RunScript { script, keys, args } = &broker.executor().calls[1] else {
+        let ExecutorCall::EvalScriptInt { script, keys, args } = &broker.executor().calls[1] else {
             panic!("expected script call");
         };
-        assert_eq!(*script, RedisEnqueueScript::ScheduleUnique);
+        assert_eq!(*script, RedisScript::ScheduleUnique);
         assert_eq!(
             keys,
             &[
@@ -363,7 +454,7 @@ mod tests {
         );
         let plan = EnqueuePlan::from_task(&task, now, "task-id").unwrap();
         let executor = FakeExecutor {
-            script_results: vec![-1],
+            script_int_results: vec![-1],
             ..FakeExecutor::default()
         };
         let mut broker = RedisBroker::with_clock(executor, TestClock(now));
@@ -379,7 +470,7 @@ mod tests {
         let task = Task::new("email:welcome", Vec::new());
         let plan = EnqueuePlan::from_task(&task, now, "task-id").unwrap();
         let executor = FakeExecutor {
-            script_results: vec![0],
+            script_int_results: vec![0],
             ..FakeExecutor::default()
         };
         let mut broker = RedisBroker::with_clock(executor, TestClock(now));
@@ -403,6 +494,74 @@ mod tests {
         let error = broker.enqueue(&plan).unwrap_err();
 
         assert_eq!(error, BrokerError::Other("connection closed".to_owned()));
+    }
+
+    #[test]
+    fn dequeues_first_available_task() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
+        msg.id = "task-id".to_owned();
+        msg.queue = "critical".to_owned();
+        let executor = FakeExecutor {
+            script_bytes_results: vec![None, Some(msg.encode_to_vec())],
+            ..FakeExecutor::default()
+        };
+        let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+
+        let task = broker
+            .dequeue(&["empty".to_owned(), "critical".to_owned()])
+            .unwrap();
+
+        assert_eq!(task.message(), &msg);
+        assert_eq!(
+            task.lease_expires_at(),
+            UNIX_EPOCH + Duration::from_secs(1_700_000_030)
+        );
+        assert_eq!(broker.executor().calls.len(), 2);
+        let ExecutorCall::EvalScriptBytes { script, keys, args } = &broker.executor().calls[0]
+        else {
+            panic!("expected dequeue script call");
+        };
+        assert_eq!(*script, RedisScript::Dequeue);
+        assert_eq!(
+            keys,
+            &[
+                "asynq:{empty}:pending".to_owned(),
+                "asynq:{empty}:active".to_owned(),
+                "asynq:{empty}:lease".to_owned(),
+                "asynq:{empty}:t:".to_owned(),
+                "asynq:{empty}:paused".to_owned(),
+            ]
+        );
+        assert_eq!(args, &[RedisArg::I64(1_700_000_030)]);
+    }
+
+    #[test]
+    fn dequeue_reports_no_processable_task() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let executor = FakeExecutor {
+            script_bytes_results: vec![None],
+            ..FakeExecutor::default()
+        };
+        let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+
+        let error = broker.dequeue(&["critical".to_owned()]).unwrap_err();
+
+        assert_eq!(error, DequeueError::NoProcessableTask);
+    }
+
+    #[test]
+    fn dequeue_maps_executor_errors() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let executor = FakeExecutor {
+            script_error: Some(RedisExecutorError::new("connection closed")),
+            ..FakeExecutor::default()
+        };
+        let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+
+        let error = broker.dequeue(&["critical".to_owned()]).unwrap_err();
+
+        assert_eq!(error, DequeueError::Other("connection closed".to_owned()));
     }
 
     #[derive(Debug, Clone, Copy)]

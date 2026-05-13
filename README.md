@@ -13,3 +13,4 @@ while the `CHANGELOG.md` file records meaningful project changes over time.
 
 - [Task and TaskMessage](docs/TaskAndTaskMessage_zhCN.md)
 - [Enqueue Tutorial](docs/EnqueueTutorial_zhCN.md)
+- [Worker Dequeue](docs/WorkerDequeue_zhCN.md)

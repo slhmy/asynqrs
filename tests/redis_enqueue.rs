@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use asynq_rs::{
-    BrokerError, Client, ClientError, RedisBroker, RedisConnectionExecutor, RedisEnqueueScript,
-    RedisScriptResult, Task, TaskMessage, TaskOption, TaskState,
+    BrokerError, Client, ClientError, DequeueBroker, RedisBroker, RedisConnectionExecutor,
+    RedisScript, RedisScriptResult, Task, TaskMessage, TaskOption, TaskState,
 };
 use redis::Commands;
 use testcontainers_modules::{
@@ -13,7 +13,7 @@ use testcontainers_modules::{
 
 const REDIS_URL_ENV: &str = "ASYNQ_RS_REDIS_URL";
 
-// Reference: Asynq v0.26.0 Redis enqueue scripts and key layout:
+// Reference: Asynq v0.26.0 Redis task scripts and key layout:
 // <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735>.
 
 #[test]
@@ -58,6 +58,33 @@ fn pending_enqueue_writes_task_hash_pending_list_and_queue_set() {
             .sismember::<_, _, bool>("asynq:queues", queue)
             .unwrap()
     );
+
+    let dequeued = client
+        .broker_mut()
+        .dequeue(&[fixture.queue().to_owned()])
+        .unwrap();
+    assert_eq!(dequeued.message().id, "task-id");
+    assert_eq!(dequeued.message().queue, fixture.queue());
+
+    let stored: HashMap<String, Vec<u8>> = fixture.connection.hgetall(&task_key).unwrap();
+    assert_eq!(string_field(&stored, "state"), "active");
+    assert!(!stored.contains_key("pending_since"));
+
+    let pending_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.pending_key(), 0, -1)
+        .unwrap();
+    assert!(pending_ids.is_empty());
+    let active_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.active_key(), 0, -1)
+        .unwrap();
+    assert_eq!(active_ids, ["task-id"]);
+    let lease_score: f64 = fixture
+        .connection
+        .zscore(fixture.lease_key(), "task-id")
+        .unwrap();
+    assert!(lease_score > 0.0);
 }
 
 #[test]
@@ -182,7 +209,7 @@ fn group_enqueue_writes_group_zset_and_groups_set() {
 #[test]
 fn script_result_mapping_documents_unique_duplicate_code() {
     assert_eq!(
-        RedisEnqueueScript::EnqueueUnique.result_for_code(-1),
+        RedisScript::EnqueueUnique.result_for_code(-1),
         Some(RedisScriptResult::DuplicateTask)
     );
 }
@@ -231,6 +258,14 @@ impl RedisFixture {
 
     fn pending_key(&self) -> String {
         format!("asynq:{{{}}}:pending", self.queue)
+    }
+
+    fn active_key(&self) -> String {
+        format!("asynq:{{{}}}:active", self.queue)
+    }
+
+    fn lease_key(&self) -> String {
+        format!("asynq:{{{}}}:lease", self.queue)
     }
 
     fn scheduled_key(&self) -> String {
