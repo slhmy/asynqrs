@@ -2,6 +2,12 @@
 
 ## 2026-05-14
 
+- Restructured Redis internals under `src/broker/redis/` and added a
+  `broker::redis` module boundary while keeping the public crate re-exports
+  stable.
+- No Redis behavior changed; this is a module-organization pass to make the
+  upcoming retry/archive/recovery work easier to place.
+
 - Added the worker-side successful completion path: `CompleteBroker`,
   `CompleteError`, `RedisCompletePlan`, and `RedisBroker::complete`.
   Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L325-L379
