@@ -1,4 +1,5 @@
 mod client;
+mod complete;
 mod dequeue;
 mod enqueue;
 pub mod keys;
@@ -16,6 +17,7 @@ pub use client::{
     Broker, BrokerError, Client, ClientError, Clock, EnqueueResult, SystemClock, TaskIdGenerator,
     UuidTaskIdGenerator,
 };
+pub use complete::{CompleteBroker, CompleteError};
 pub use dequeue::{DequeueBroker, DequeueError, DequeuedTask};
 pub use enqueue::{DEFAULT_MAX_RETRY, DEFAULT_TIMEOUT, EnqueuePlan, EnqueuePlanError};
 pub use message::{DecodeTaskMessageError, TaskMessage};
@@ -26,8 +28,9 @@ pub use redis_executor::{
     RedisConnectionProviderExecutor,
 };
 pub use redis_plan::{
-    DEFAULT_LEASE_DURATION, RedisArg, RedisDequeueCall, RedisDequeuePlan, RedisDequeuePlanError,
-    RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError, RedisScript, RedisScriptCall,
+    DEFAULT_LEASE_DURATION, RedisArg, RedisCompletePlan, RedisCompletePlanError, RedisDequeueCall,
+    RedisDequeuePlan, RedisDequeuePlanError, RedisEnqueueOperation, RedisEnqueuePlan,
+    RedisEnqueuePlanError, RedisScript, RedisScriptCall, STATS_TTL,
 };
 pub use redis_scripts::{RedisScriptCallError, RedisScriptResult, RedisScriptSpec};
 pub use state::{ParseTaskStateError, TaskState};

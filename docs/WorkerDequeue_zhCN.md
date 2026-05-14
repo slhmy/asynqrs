@@ -1,23 +1,28 @@
-# Worker Dequeue
+# Worker Dequeue And Complete
 
-这份文档记录当前 worker 侧已经实现的最小能力：从 Redis pending queue
-取出一个任务，移动到 active queue，并写入 lease。
+这份文档记录当前 worker 侧已经实现的最小成功路径：从 Redis pending
+queue 取出一个任务，移动到 active queue，写入 lease，然后在处理成功后
+完成任务。
 
 实现参考 Asynq v0.26.0：
 
 - `RDB.Dequeue`：
   <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L243-L274>
+- `RDB.Done` / `RDB.MarkAsComplete`：
+  <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L325-L379>
 - `LeaseDuration`：
   <https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L46-L52>
+- `statsTTL`：
+  <https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L54-L60>
 - broker 接口：
   <https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L371-L419>
 
-## 当前行为
+## Dequeue
 
 `DequeueBroker` 是 worker 侧的最小 broker trait：
 
 ```rust,no_run
-use asynq_rs::{DequeueBroker, RedisBroker, RedisClientExecutor};
+use asynq_rs::{CompleteBroker, DequeueBroker, RedisBroker, RedisClientExecutor};
 
 let redis_client = redis::Client::open("redis://127.0.0.1:6379").unwrap();
 let executor = RedisClientExecutor::new(redis_client);
@@ -27,6 +32,8 @@ let task = broker.dequeue(&["critical".to_owned(), "default".to_owned()]).unwrap
 
 println!("task id: {}", task.message().id);
 println!("lease expires at: {:?}", task.lease_expires_at());
+
+broker.complete(task.message()).unwrap();
 ```
 
 `RedisBroker::dequeue` 会按传入队列顺序尝试取任务。每个队列执行一次
@@ -43,15 +50,45 @@ dequeue Lua 脚本：
 
 如果所有队列都没有可处理任务，返回 `DequeueError::NoProcessableTask`。
 
+## Complete
+
+`CompleteBroker` 是 worker 处理成功后的最小 broker trait：
+
+```rust,no_run
+use asynq_rs::{CompleteBroker, DequeuedTask};
+
+fn finish_task<B: CompleteBroker>(broker: &mut B, task: &DequeuedTask) {
+    broker.complete(task.message()).unwrap();
+}
+```
+
+`RedisBroker::complete` 会根据 task message 的 `retention` 自动选择脚本：
+
+- `retention == 0`：执行 `Done` / `DoneUnique`，从 `active` list 和
+  `lease` sorted set 中移除 task id，删除 task hash。
+- `retention > 0`：执行 `MarkAsComplete` / `MarkAsCompleteUnique`，从
+  `active` 和 `lease` 移除 task id，把 task hash state 写成
+  `completed`，更新 message 的 `completed_at`，并把 task id 写入
+  `completed` sorted set。score 是当前时间 + retention。
+- unique task 完成时会释放仍由该 task 持有的 unique lock。
+- 两条路径都会更新 daily processed counter 和 processed total counter。
+
+如果 Redis 脚本报告 task 不存在，返回 `CompleteError::NotFound`。
+
 ## Redis 测试
 
-`tests/redis_enqueue.rs` 现在覆盖了 pending enqueue 后的 dequeue 状态迁移：
+`tests/redis_enqueue.rs` 现在覆盖了 pending enqueue 后的 dequeue 和 complete
+状态迁移：
 
 - task hash state 从 `pending` 变成 `active`
 - `pending_since` 被删除
 - pending list 变空
 - active list 包含 task id
 - lease sorted set 包含 task id
+- zero-retention task 完成后 task hash 被删除
+- retained task 完成后进入 `completed` sorted set
+- complete 会清理 active/lease 并更新 processed counters
+- unique task complete 会释放 unique lock
 
 本地运行：
 
@@ -65,8 +102,8 @@ CI 会通过 Redis service 设置 `ASYNQ_RS_REDIS_URL`，因此会连接真实 R
 ## 还没实现的部分
 
 - worker `Server` / `Processor` 主循环。
-- ack / done：任务成功后从 active 和 lease 中移除。
 - retry：任务失败后按 retry policy 进入 retry set。
 - archive：超过重试次数后归档。
 - lease 续约和 lease 过期恢复。
 - scheduled / retry task 的调度迁移。
+- completed task 过期清理。

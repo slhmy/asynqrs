@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## 2026-05-14
+
+- Added the worker-side successful completion path: `CompleteBroker`,
+  `CompleteError`, `RedisCompletePlan`, and `RedisBroker::complete`.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L325-L379
+- Added fixed Asynq v0.26.0 `done`, `done_unique`,
+  `mark_as_complete`, and `mark_as_complete_unique` Lua scripts, plus
+  executor support for status-returning script calls.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L325-L379
+- Added processed counter date keys and the 90-day stats TTL used by complete
+  scripts.
+  Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L54-L60
+- Extended Redis integration tests to cover dequeue followed by successful
+  completion for zero-retention unique tasks and retained completed tasks.
+- Updated worker lifecycle docs and the enqueue tutorial to describe dequeue
+  plus complete as the current successful worker path.
+- TODO: Add retry, archive, lease extension, expired lease recovery, and
+  completed task cleanup once failure and maintenance lifecycle paths are
+  modeled.
+
 ## 2026-05-13
 
 - Cleaned up Redis script naming now that the script catalog covers more than

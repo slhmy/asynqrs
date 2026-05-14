@@ -10,6 +10,12 @@ use crate::{EnqueuePlan, TaskMessage, TaskState};
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L46-L52>.
 pub const DEFAULT_LEASE_DURATION: Duration = Duration::from_secs(30);
 
+/// Expiration used for daily processed/failed counters.
+///
+/// Reference: Asynq v0.26.0 `statsTTL`:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L54-L60>.
+pub const STATS_TTL: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+
 /// Redis command intent for enqueueing a task.
 ///
 /// Reference: Asynq v0.26.0 Redis enqueue scripts and RDB enqueue methods:
@@ -28,6 +34,15 @@ pub struct RedisEnqueuePlan {
 pub struct RedisDequeuePlan {
     queue_calls: Vec<RedisDequeueCall>,
     lease_expires_at: SystemTime,
+}
+
+/// Redis command intent for marking an active task as successfully completed.
+///
+/// Reference: Asynq v0.26.0 `RDB.Done` and `RDB.MarkAsComplete`:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L325-L379>.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedisCompletePlan {
+    call: RedisScriptCall,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +78,10 @@ pub enum RedisScript {
     AddToGroup,
     AddToGroupUnique,
     Dequeue,
+    Done,
+    DoneUnique,
+    MarkAsComplete,
+    MarkAsCompleteUnique,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +105,13 @@ pub enum RedisEnqueuePlanError {
 pub enum RedisDequeuePlanError {
     EmptyQueueList,
     EmptyQueueName,
+    TimeOverflow(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedisCompletePlanError {
+    EmptyQueueName,
+    EmptyTaskId,
     TimeOverflow(&'static str),
 }
 
@@ -156,6 +182,31 @@ impl RedisDequeuePlan {
 
     pub fn lease_expires_at(&self) -> SystemTime {
         self.lease_expires_at
+    }
+}
+
+impl RedisCompletePlan {
+    pub fn from_message(
+        message: &TaskMessage,
+        now: SystemTime,
+    ) -> Result<Self, RedisCompletePlanError> {
+        if message.queue.trim().is_empty() {
+            return Err(RedisCompletePlanError::EmptyQueueName);
+        }
+        if message.id.trim().is_empty() {
+            return Err(RedisCompletePlanError::EmptyTaskId);
+        }
+
+        let call = if message.retention > 0 {
+            mark_as_complete_call(message, now)?
+        } else {
+            done_call(message, now)?
+        };
+        Ok(Self { call })
+    }
+
+    pub fn call(&self) -> &RedisScriptCall {
+        &self.call
     }
 }
 
@@ -362,6 +413,88 @@ fn encoded_msg_arg(msg: &TaskMessage) -> RedisArg {
     RedisArg::Bytes(msg.encode_to_vec())
 }
 
+fn done_call(
+    msg: &TaskMessage,
+    now: SystemTime,
+) -> Result<RedisScriptCall, RedisCompletePlanError> {
+    let script = if msg.unique_key.is_empty() {
+        RedisScript::Done
+    } else {
+        RedisScript::DoneUnique
+    };
+    let mut keys = vec![
+        keys::active_key(&msg.queue),
+        keys::lease_key(&msg.queue),
+        task_key(msg),
+        keys::processed_key(&msg.queue, now),
+        keys::processed_total_key(&msg.queue),
+    ];
+    if !msg.unique_key.is_empty() {
+        keys.push(msg.unique_key.clone());
+    }
+
+    Ok(RedisScriptCall::new(
+        script,
+        keys,
+        vec![
+            RedisArg::String(msg.id.clone()),
+            RedisArg::I64(stats_expire_at(now)?),
+            RedisArg::I64(i64::MAX),
+        ],
+    ))
+}
+
+fn mark_as_complete_call(
+    msg: &TaskMessage,
+    now: SystemTime,
+) -> Result<RedisScriptCall, RedisCompletePlanError> {
+    let script = if msg.unique_key.is_empty() {
+        RedisScript::MarkAsComplete
+    } else {
+        RedisScript::MarkAsCompleteUnique
+    };
+    let mut keys = vec![
+        keys::active_key(&msg.queue),
+        keys::lease_key(&msg.queue),
+        keys::completed_key(&msg.queue),
+        task_key(msg),
+        keys::processed_key(&msg.queue, now),
+        keys::processed_total_key(&msg.queue),
+    ];
+    if !msg.unique_key.is_empty() {
+        keys.push(msg.unique_key.clone());
+    }
+
+    let completed_at = unix_seconds_complete(now, "complete time")?;
+    let expires_at =
+        completed_at
+            .checked_add(msg.retention)
+            .ok_or(RedisCompletePlanError::TimeOverflow(
+                "completed task expiration",
+            ))?;
+    let mut completed = msg.clone();
+    completed.completed_at = completed_at;
+
+    Ok(RedisScriptCall::new(
+        script,
+        keys,
+        vec![
+            RedisArg::String(msg.id.clone()),
+            RedisArg::I64(stats_expire_at(now)?),
+            RedisArg::I64(expires_at),
+            encoded_msg_arg(&completed),
+            RedisArg::I64(i64::MAX),
+        ],
+    ))
+}
+
+fn stats_expire_at(now: SystemTime) -> Result<i64, RedisCompletePlanError> {
+    let time = now
+        .checked_add(STATS_TTL)
+        .ok_or(RedisCompletePlanError::TimeOverflow("stats expiration"))?;
+    unix_seconds_complete(time, "stats expiration")
+}
+
 fn unix_nanoseconds(time: SystemTime) -> Result<i64, RedisEnqueuePlanError> {
     let nanos = match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => duration_nanoseconds(duration),
@@ -383,6 +516,19 @@ fn unix_seconds_checked(
     seconds
         .try_into()
         .map_err(|_| RedisDequeuePlanError::TimeOverflow(context))
+}
+
+fn unix_seconds_complete(
+    time: SystemTime,
+    context: &'static str,
+) -> Result<i64, RedisCompletePlanError> {
+    let seconds = match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i128::from(duration_seconds(duration)),
+        Err(error) => -i128::from(duration_seconds(error.duration())),
+    };
+    seconds
+        .try_into()
+        .map_err(|_| RedisCompletePlanError::TimeOverflow(context))
 }
 
 fn duration_nanoseconds(duration: Duration) -> i128 {
@@ -419,6 +565,18 @@ impl std::fmt::Display for RedisDequeuePlanError {
 }
 
 impl std::error::Error for RedisDequeuePlanError {}
+
+impl std::fmt::Display for RedisCompletePlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
+            Self::EmptyTaskId => f.write_str("task id must contain one or more characters"),
+            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
+        }
+    }
+}
+
+impl std::error::Error for RedisCompletePlanError {}
 
 #[cfg(test)]
 mod tests {
@@ -657,6 +815,114 @@ mod tests {
         );
     }
 
+    #[test]
+    fn plans_done_script_for_zero_retention_task() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let msg = active_message(0, "");
+
+        let plan = RedisCompletePlan::from_message(&msg, now).unwrap();
+        let call = plan.call();
+
+        assert_eq!(call.script(), RedisScript::Done);
+        assert_eq!(
+            call.keys(),
+            &[
+                "asynq:{critical}:active".to_owned(),
+                "asynq:{critical}:lease".to_owned(),
+                "asynq:{critical}:t:task-id".to_owned(),
+                "asynq:{critical}:processed:2023-11-14".to_owned(),
+                "asynq:{critical}:processed".to_owned(),
+            ]
+        );
+        assert_eq!(call.args()[0], RedisArg::String("task-id".to_owned()));
+        assert_eq!(call.args()[1], RedisArg::I64(1_707_776_000));
+        assert_eq!(call.args()[2], RedisArg::I64(i64::MAX));
+    }
+
+    #[test]
+    fn plans_done_unique_script_for_zero_retention_unique_task() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let msg = active_message(
+            0,
+            "asynq:{critical}:unique:email:welcome:321c3cf486ed509164edec1e1981fec8",
+        );
+
+        let plan = RedisCompletePlan::from_message(&msg, now).unwrap();
+        let call = plan.call();
+
+        assert_eq!(call.script(), RedisScript::DoneUnique);
+        assert_eq!(
+            call.keys()[5],
+            "asynq:{critical}:unique:email:welcome:321c3cf486ed509164edec1e1981fec8"
+        );
+        assert_eq!(call.args()[0], RedisArg::String("task-id".to_owned()));
+    }
+
+    #[test]
+    fn plans_mark_as_complete_script_for_retained_task() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let msg = active_message(300, "");
+
+        let plan = RedisCompletePlan::from_message(&msg, now).unwrap();
+        let call = plan.call();
+
+        assert_eq!(call.script(), RedisScript::MarkAsComplete);
+        assert_eq!(
+            call.keys(),
+            &[
+                "asynq:{critical}:active".to_owned(),
+                "asynq:{critical}:lease".to_owned(),
+                "asynq:{critical}:completed".to_owned(),
+                "asynq:{critical}:t:task-id".to_owned(),
+                "asynq:{critical}:processed:2023-11-14".to_owned(),
+                "asynq:{critical}:processed".to_owned(),
+            ]
+        );
+        assert_eq!(call.args()[0], RedisArg::String("task-id".to_owned()));
+        assert_eq!(call.args()[1], RedisArg::I64(1_707_776_000));
+        assert_eq!(call.args()[2], RedisArg::I64(1_700_000_300));
+        assert_completed_message(&call.args()[3], &msg, 1_700_000_000);
+        assert_eq!(call.args()[4], RedisArg::I64(i64::MAX));
+    }
+
+    #[test]
+    fn plans_mark_as_complete_unique_script_for_retained_unique_task() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let msg = active_message(
+            300,
+            "asynq:{critical}:unique:email:welcome:321c3cf486ed509164edec1e1981fec8",
+        );
+
+        let plan = RedisCompletePlan::from_message(&msg, now).unwrap();
+        let call = plan.call();
+
+        assert_eq!(call.script(), RedisScript::MarkAsCompleteUnique);
+        assert_eq!(
+            call.keys()[6],
+            "asynq:{critical}:unique:email:welcome:321c3cf486ed509164edec1e1981fec8"
+        );
+        assert_completed_message(&call.args()[3], &msg, 1_700_000_000);
+    }
+
+    #[test]
+    fn validates_complete_inputs() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut msg = active_message(0, "");
+
+        msg.queue = " ".to_owned();
+        assert_eq!(
+            RedisCompletePlan::from_message(&msg, now).unwrap_err(),
+            RedisCompletePlanError::EmptyQueueName
+        );
+
+        msg.queue = "critical".to_owned();
+        msg.id = " ".to_owned();
+        assert_eq!(
+            RedisCompletePlan::from_message(&msg, now).unwrap_err(),
+            RedisCompletePlanError::EmptyTaskId
+        );
+    }
+
     fn only_script(plan: &RedisEnqueuePlan) -> &RedisScriptCall {
         assert_eq!(plan.operations().len(), 2);
         match &plan.operations()[1] {
@@ -671,5 +937,25 @@ mod tests {
         };
         let decoded = TaskMessage::decode_from_slice(data).unwrap();
         assert_eq!(&decoded, expected);
+    }
+
+    fn assert_completed_message(arg: &RedisArg, original: &TaskMessage, completed_at: i64) {
+        let RedisArg::Bytes(data) = arg else {
+            panic!("expected encoded message bytes, got {arg:?}");
+        };
+        let decoded = TaskMessage::decode_from_slice(data).unwrap();
+        assert_eq!(decoded.completed_at, completed_at);
+        let mut expected = original.clone();
+        expected.completed_at = completed_at;
+        assert_eq!(decoded, expected);
+    }
+
+    fn active_message(retention: i64, unique_key: &str) -> TaskMessage {
+        let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
+        msg.id = "task-id".to_owned();
+        msg.queue = "critical".to_owned();
+        msg.retention = retention;
+        msg.unique_key = unique_key.to_owned();
+        msg
     }
 }

@@ -35,7 +35,7 @@ pub enum RedisScriptCallError {
 }
 
 impl RedisScript {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 11] = [
         Self::Enqueue,
         Self::EnqueueUnique,
         Self::Schedule,
@@ -43,6 +43,10 @@ impl RedisScript {
         Self::AddToGroup,
         Self::AddToGroupUnique,
         Self::Dequeue,
+        Self::Done,
+        Self::DoneUnique,
+        Self::MarkAsComplete,
+        Self::MarkAsCompleteUnique,
     ];
 
     pub const fn spec(self) -> RedisScriptSpec {
@@ -96,6 +100,34 @@ impl RedisScript {
                 key_count: 5,
                 arg_count: 1,
             },
+            Self::Done => RedisScriptSpec {
+                script: self,
+                name: "done",
+                source: DONE_SOURCE,
+                key_count: 5,
+                arg_count: 3,
+            },
+            Self::DoneUnique => RedisScriptSpec {
+                script: self,
+                name: "done_unique",
+                source: DONE_UNIQUE_SOURCE,
+                key_count: 6,
+                arg_count: 3,
+            },
+            Self::MarkAsComplete => RedisScriptSpec {
+                script: self,
+                name: "mark_as_complete",
+                source: MARK_AS_COMPLETE_SOURCE,
+                key_count: 6,
+                arg_count: 5,
+            },
+            Self::MarkAsCompleteUnique => RedisScriptSpec {
+                script: self,
+                name: "mark_as_complete_unique",
+                source: MARK_AS_COMPLETE_UNIQUE_SOURCE,
+                key_count: 7,
+                arg_count: 5,
+            },
         }
     }
 
@@ -116,12 +148,27 @@ impl RedisScript {
     }
 
     pub const fn result_for_code(self, code: i64) -> Option<RedisScriptResult> {
+        if !self.supports_integer_result() {
+            return None;
+        }
         match code {
             1 => Some(RedisScriptResult::Success),
             0 => Some(RedisScriptResult::TaskIdConflict),
             -1 if self.supports_duplicate_result() => Some(RedisScriptResult::DuplicateTask),
             _ => None,
         }
+    }
+
+    pub const fn supports_integer_result(self) -> bool {
+        matches!(
+            self,
+            Self::Enqueue
+                | Self::EnqueueUnique
+                | Self::Schedule
+                | Self::ScheduleUnique
+                | Self::AddToGroup
+                | Self::AddToGroupUnique
+        )
     }
 
     pub const fn supports_duplicate_result(self) -> bool {
@@ -318,12 +365,119 @@ end
 return nil
 "#;
 
+// Source: Asynq v0.26.0 `doneCmd`.
+const DONE_SOURCE: &str = r#"
+if redis.call("LREM", KEYS[1], 0, ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZREM", KEYS[2], ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("DEL", KEYS[3]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+local n = redis.call("INCR", KEYS[4])
+if tonumber(n) == 1 then
+	redis.call("EXPIREAT", KEYS[4], ARGV[2])
+end
+local total = redis.call("GET", KEYS[5])
+if tonumber(total) == tonumber(ARGV[3]) then
+	redis.call("SET", KEYS[5], 1)
+else
+	redis.call("INCR", KEYS[5])
+end
+return redis.status_reply("OK")
+"#;
+
+// Source: Asynq v0.26.0 `doneUniqueCmd`.
+const DONE_UNIQUE_SOURCE: &str = r#"
+if redis.call("LREM", KEYS[1], 0, ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZREM", KEYS[2], ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("DEL", KEYS[3]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+local n = redis.call("INCR", KEYS[4])
+if tonumber(n) == 1 then
+	redis.call("EXPIREAT", KEYS[4], ARGV[2])
+end
+local total = redis.call("GET", KEYS[5])
+if tonumber(total) == tonumber(ARGV[3]) then
+	redis.call("SET", KEYS[5], 1)
+else
+	redis.call("INCR", KEYS[5])
+end
+if redis.call("GET", KEYS[6]) == ARGV[1] then
+  redis.call("DEL", KEYS[6])
+end
+return redis.status_reply("OK")
+"#;
+
+// Source: Asynq v0.26.0 `markAsCompleteCmd`.
+const MARK_AS_COMPLETE_SOURCE: &str = r#"
+if redis.call("LREM", KEYS[1], 0, ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZREM", KEYS[2], ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZADD", KEYS[3], ARGV[3], ARGV[1]) ~= 1 then
+  return redis.error_reply("INTERNAL")
+end
+redis.call("HSET", KEYS[4], "msg", ARGV[4], "state", "completed")
+local n = redis.call("INCR", KEYS[5])
+if tonumber(n) == 1 then
+	redis.call("EXPIREAT", KEYS[5], ARGV[2])
+end
+local total = redis.call("GET", KEYS[6])
+if tonumber(total) == tonumber(ARGV[5]) then
+	redis.call("SET", KEYS[6], 1)
+else
+	redis.call("INCR", KEYS[6])
+end
+return redis.status_reply("OK")
+"#;
+
+// Source: Asynq v0.26.0 `markAsCompleteUniqueCmd`.
+const MARK_AS_COMPLETE_UNIQUE_SOURCE: &str = r#"
+if redis.call("LREM", KEYS[1], 0, ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZREM", KEYS[2], ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZADD", KEYS[3], ARGV[3], ARGV[1]) ~= 1 then
+  return redis.error_reply("INTERNAL")
+end
+redis.call("HSET", KEYS[4], "msg", ARGV[4], "state", "completed")
+local n = redis.call("INCR", KEYS[5])
+if tonumber(n) == 1 then
+	redis.call("EXPIREAT", KEYS[5], ARGV[2])
+end
+local total = redis.call("GET", KEYS[6])
+if tonumber(total) == tonumber(ARGV[5]) then
+	redis.call("SET", KEYS[6], 1)
+else
+	redis.call("INCR", KEYS[6])
+end
+if redis.call("GET", KEYS[7]) == ARGV[1] then
+  redis.call("DEL", KEYS[7])
+end
+return redis.status_reply("OK")
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, UNIX_EPOCH};
 
-    use crate::{EnqueuePlan, RedisEnqueueOperation, RedisEnqueuePlan, Task, TaskOption};
+    use crate::{
+        EnqueuePlan, RedisCompletePlan, RedisEnqueueOperation, RedisEnqueuePlan, Task, TaskMessage,
+        TaskOption,
+    };
 
     #[test]
     fn scripts_have_sources_and_shapes() {
@@ -335,6 +489,15 @@ mod tests {
             (RedisScript::AddToGroup, "add_to_group", 3, 4),
             (RedisScript::AddToGroupUnique, "add_to_group_unique", 4, 5),
             (RedisScript::Dequeue, "dequeue", 5, 1),
+            (RedisScript::Done, "done", 5, 3),
+            (RedisScript::DoneUnique, "done_unique", 6, 3),
+            (RedisScript::MarkAsComplete, "mark_as_complete", 6, 5),
+            (
+                RedisScript::MarkAsCompleteUnique,
+                "mark_as_complete_unique",
+                7,
+                5,
+            ),
         ];
 
         for (script, name, key_count, arg_count) in expected {
@@ -344,11 +507,21 @@ mod tests {
             assert_eq!(spec.key_count(), key_count);
             assert_eq!(spec.arg_count(), arg_count);
             assert!(spec.source().contains("redis.call"));
-            if script == RedisScript::Dequeue {
-                assert!(spec.source().contains("return nil"));
-                assert!(spec.source().contains("HGET"));
-            } else {
-                assert!(spec.source().contains("return 1"));
+            match script {
+                RedisScript::Dequeue => {
+                    assert!(spec.source().contains("return nil"));
+                    assert!(spec.source().contains("HGET"));
+                }
+                RedisScript::Done
+                | RedisScript::DoneUnique
+                | RedisScript::MarkAsComplete
+                | RedisScript::MarkAsCompleteUnique => {
+                    assert!(spec.source().contains("status_reply"));
+                    assert!(spec.source().contains("NOT FOUND"));
+                }
+                _ => {
+                    assert!(spec.source().contains("return 1"));
+                }
             }
         }
     }
@@ -368,6 +541,7 @@ mod tests {
             RedisScript::EnqueueUnique.result_for_code(-1),
             Some(RedisScriptResult::DuplicateTask)
         );
+        assert_eq!(RedisScript::Done.result_for_code(1), None);
     }
 
     #[test]
@@ -485,5 +659,35 @@ mod tests {
             };
             call.validate().unwrap();
         }
+    }
+
+    #[test]
+    fn redis_complete_plans_match_script_shapes() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut messages = Vec::new();
+        messages.push(active_message(0, ""));
+        messages.push(active_message(
+            0,
+            "asynq:{critical}:unique:email:welcome:321c3cf486ed509164edec1e1981fec8",
+        ));
+        messages.push(active_message(300, ""));
+        messages.push(active_message(
+            300,
+            "asynq:{critical}:unique:email:welcome:321c3cf486ed509164edec1e1981fec8",
+        ));
+
+        for message in messages {
+            let redis_plan = RedisCompletePlan::from_message(&message, now).unwrap();
+            redis_plan.call().validate().unwrap();
+        }
+    }
+
+    fn active_message(retention: i64, unique_key: &str) -> TaskMessage {
+        let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
+        msg.id = "task-id".to_owned();
+        msg.queue = "critical".to_owned();
+        msg.retention = retention;
+        msg.unique_key = unique_key.to_owned();
+        msg
     }
 }

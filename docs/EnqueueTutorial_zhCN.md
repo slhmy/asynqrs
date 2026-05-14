@@ -226,6 +226,8 @@ task body 的内容。
 
 - `sadd(key, member)`：发布队列名。
 - `eval_script_int(call)`：执行返回整数状态码的 enqueue 脚本调用。
+- `eval_script_bytes(call)`：执行 dequeue 脚本并读取 task message bytes。
+- `eval_script_status(call)`：执行 complete/done 这类返回 Redis status 的脚本。
 
 `RedisExecutor` 是真实 Redis client 的适配边界。代码里已经提供了两种同步
 `redis` crate 适配器：
@@ -264,7 +266,7 @@ let mut client = Client::new(broker);
 - `name()`：脚本名，例如 `enqueue_unique`。
 - `source()`：固定到 Asynq v0.26.0 的 Lua 源码。
 - `key_count()` / `arg_count()`：调用形状。
-- `result_for_code(code)`：返回码语义。
+- `result_for_code(code)`：enqueue/group/schedule 这类整数返回码脚本的返回码语义。
 
 `RedisBroker` 会在调用 executor 前校验 `RedisScriptCall` 的 key/arg 数量。
 
@@ -283,12 +285,11 @@ let mut client = Client::new(broker);
 - 异步 Redis executor。
 - Redis 连接池封装。当前已有 `RedisConnectionProvider` 边界，可以给池类型
   实现该 trait。
-- 完整覆盖所有 Redis 依赖场景的测试环境；当前 Redis 集成测试会优先尝试
-  testcontainers，再回退到 `ASYNQ_RS_REDIS_URL`，最后在没有 Docker 时跳过。
-- worker 侧取任务、执行、ack、retry、archive、complete。
+- 完整 worker server 主循环。
+- worker 侧 retry、archive、lease 续约、lease 过期恢复和 completed task 清理。
 - `ResultWriter` 等 worker 执行期能力。
 
-下一步比较自然的是补自动化 Redis 测试环境、真正连接池适配，或 worker 侧生命周期：
+下一步比较自然的是继续补 worker 侧失败路径，或做真正连接池适配：
 
 当前已有 Redis 集成测试，可以这样运行：
 
@@ -296,8 +297,9 @@ let mut client = Client::new(broker);
 cargo test --test redis_enqueue
 ```
 
-这些测试覆盖 pending、scheduled、unique 和 group 入队路径。后续可以继续补：
+这些测试覆盖 pending、scheduled、unique、group 入队路径，以及 dequeue 后
+complete 的成功路径。后续可以继续补：
 
-1. testcontainers 或其他自动 Redis 启动方式。
+1. worker 侧 retry、archive、lease 续约和 lease 过期恢复。
 2. async runtime 和连接池实现。
-3. worker 侧 dequeue、ack、retry、archive、complete。
+3. completed task 过期清理。

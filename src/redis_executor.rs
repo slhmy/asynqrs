@@ -48,6 +48,8 @@ pub trait RedisCommandExecutor {
         &mut self,
         call: &RedisDequeueCall,
     ) -> Result<Option<Vec<u8>>, Self::Error>;
+
+    fn eval_script_status(&mut self, call: &RedisScriptCall) -> Result<String, Self::Error>;
 }
 
 impl<P> RedisConnectionProviderExecutor<P> {
@@ -104,6 +106,10 @@ where
     ) -> Result<Option<Vec<u8>>, RedisExecutorError> {
         self.with_connection(|connection| connection.eval_script_bytes(call))
     }
+
+    fn eval_script_status(&mut self, call: &RedisScriptCall) -> Result<String, RedisExecutorError> {
+        self.with_connection(|connection| connection.eval_script_status(call))
+    }
 }
 
 impl<P> RedisConnectionProviderExecutor<P>
@@ -148,6 +154,12 @@ where
             .eval_script_bytes(call)
             .map_err(redis_executor_error)
     }
+
+    fn eval_script_status(&mut self, call: &RedisScriptCall) -> Result<String, RedisExecutorError> {
+        self.connection
+            .eval_script_status(call)
+            .map_err(redis_executor_error)
+    }
 }
 
 impl RedisConnectionProvider for redis::Client {
@@ -178,6 +190,10 @@ where
         &mut self,
         call: &RedisDequeueCall,
     ) -> Result<Option<Vec<u8>>, Self::Error> {
+        eval_script(self, call.script(), call.keys(), call.args())
+    }
+
+    fn eval_script_status(&mut self, call: &RedisScriptCall) -> Result<String, Self::Error> {
         eval_script(self, call.script(), call.keys(), call.args())
     }
 }
@@ -233,8 +249,10 @@ mod tests {
         sadd_calls: Vec<(String, String)>,
         script_int_calls: Vec<(RedisScript, Vec<String>, Vec<RedisArg>)>,
         script_bytes_calls: Vec<(RedisScript, Vec<String>, Vec<RedisArg>)>,
+        script_status_calls: Vec<(RedisScript, Vec<String>, Vec<RedisArg>)>,
         script_int_results: Vec<i64>,
         script_bytes_results: Vec<Option<Vec<u8>>>,
+        script_status_results: Vec<String>,
         sadd_error: Option<String>,
         script_error: Option<String>,
     }
@@ -275,6 +293,21 @@ mod tests {
                 return Err(FakeError(error.clone()));
             }
             Ok(self.script_bytes_results.pop().unwrap_or(None))
+        }
+
+        fn eval_script_status(&mut self, call: &RedisScriptCall) -> Result<String, Self::Error> {
+            self.script_status_calls.push((
+                call.script(),
+                call.keys().to_vec(),
+                call.args().to_vec(),
+            ));
+            if let Some(error) = &self.script_error {
+                return Err(FakeError(error.clone()));
+            }
+            Ok(self
+                .script_status_results
+                .pop()
+                .unwrap_or_else(|| "OK".to_owned()))
         }
     }
 
@@ -348,6 +381,41 @@ mod tests {
     }
 
     #[test]
+    fn forwards_status_script_eval_to_connection() {
+        let mut executor = RedisConnectionExecutor::new(FakeConnection {
+            script_status_results: vec!["OK".to_owned()],
+            ..FakeConnection::default()
+        });
+        let call = RedisScriptCall::new(
+            RedisScript::Done,
+            vec![
+                "asynq:{critical}:active".to_owned(),
+                "asynq:{critical}:lease".to_owned(),
+                "asynq:{critical}:t:task-id".to_owned(),
+                "asynq:{critical}:processed:2023-11-14".to_owned(),
+                "asynq:{critical}:processed".to_owned(),
+            ],
+            vec![
+                RedisArg::String("task-id".to_owned()),
+                RedisArg::I64(1_707_776_000),
+                RedisArg::I64(i64::MAX),
+            ],
+        );
+
+        let result = executor.eval_script_status(&call).unwrap();
+
+        assert_eq!(result, "OK");
+        assert_eq!(
+            executor.connection().script_status_calls,
+            [(
+                RedisScript::Done,
+                call.keys().to_vec(),
+                call.args().to_vec()
+            )]
+        );
+    }
+
+    #[test]
     fn maps_connection_errors() {
         let mut executor = RedisConnectionExecutor::new(FakeConnection {
             sadd_error: Some("connection closed".to_owned()),
@@ -376,6 +444,11 @@ mod tests {
             keys: Vec<String>,
             args: Vec<RedisArg>,
         },
+        EvalScriptStatus {
+            script: RedisScript,
+            keys: Vec<String>,
+            args: Vec<RedisArg>,
+        },
     }
 
     #[derive(Debug, Default)]
@@ -385,6 +458,7 @@ mod tests {
         command_error: Option<String>,
         script_int_results: Rc<RefCell<Vec<i64>>>,
         script_bytes_results: Rc<RefCell<Vec<Option<Vec<u8>>>>>,
+        script_status_results: Rc<RefCell<Vec<String>>>,
     }
 
     #[derive(Debug)]
@@ -393,6 +467,7 @@ mod tests {
         command_error: Option<String>,
         script_int_results: Rc<RefCell<Vec<i64>>>,
         script_bytes_results: Rc<RefCell<Vec<Option<Vec<u8>>>>>,
+        script_status_results: Rc<RefCell<Vec<String>>>,
     }
 
     impl RedisConnectionProvider for FakeProvider {
@@ -409,6 +484,7 @@ mod tests {
                 command_error: self.command_error.clone(),
                 script_int_results: Rc::clone(&self.script_int_results),
                 script_bytes_results: Rc::clone(&self.script_bytes_results),
+                script_status_results: Rc::clone(&self.script_status_results),
             })
         }
     }
@@ -452,6 +528,24 @@ mod tests {
                 return Err(FakeError(error.clone()));
             }
             Ok(self.script_bytes_results.borrow_mut().pop().unwrap_or(None))
+        }
+
+        fn eval_script_status(&mut self, call: &RedisScriptCall) -> Result<String, Self::Error> {
+            self.calls
+                .borrow_mut()
+                .push(ProviderCall::EvalScriptStatus {
+                    script: call.script(),
+                    keys: call.keys().to_vec(),
+                    args: call.args().to_vec(),
+                });
+            if let Some(error) = &self.command_error {
+                return Err(FakeError(error.clone()));
+            }
+            Ok(self
+                .script_status_results
+                .borrow_mut()
+                .pop()
+                .unwrap_or_else(|| "OK".to_owned()))
         }
     }
 
@@ -515,6 +609,46 @@ mod tests {
                 ProviderCall::GetConnection,
                 ProviderCall::EvalScriptBytes {
                     script: RedisScript::Dequeue,
+                    keys: call.keys().to_vec(),
+                    args: call.args().to_vec()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_executor_evals_status_script() {
+        let provider = FakeProvider {
+            script_status_results: Rc::new(RefCell::new(vec!["OK".to_owned()])),
+            ..FakeProvider::default()
+        };
+        let calls = Rc::clone(&provider.calls);
+        let mut executor = RedisConnectionProviderExecutor::new(provider);
+        let call = RedisScriptCall::new(
+            RedisScript::Done,
+            vec![
+                "asynq:{critical}:active".to_owned(),
+                "asynq:{critical}:lease".to_owned(),
+                "asynq:{critical}:t:task-id".to_owned(),
+                "asynq:{critical}:processed:2023-11-14".to_owned(),
+                "asynq:{critical}:processed".to_owned(),
+            ],
+            vec![
+                RedisArg::String("task-id".to_owned()),
+                RedisArg::I64(1_707_776_000),
+                RedisArg::I64(i64::MAX),
+            ],
+        );
+
+        let result = executor.eval_script_status(&call).unwrap();
+
+        assert_eq!(result, "OK");
+        assert_eq!(
+            *calls.borrow(),
+            [
+                ProviderCall::GetConnection,
+                ProviderCall::EvalScriptStatus {
+                    script: RedisScript::Done,
                     keys: call.keys().to_vec(),
                     args: call.args().to_vec()
                 }

@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use asynq_rs::{
-    BrokerError, Client, ClientError, DequeueBroker, RedisBroker, RedisConnectionExecutor,
-    RedisScript, RedisScriptResult, Task, TaskMessage, TaskOption, TaskState,
+    BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, RedisBroker,
+    RedisConnectionExecutor, RedisScript, RedisScriptResult, Task, TaskMessage, TaskOption,
+    TaskState,
 };
 use redis::Commands;
 use testcontainers_modules::{
@@ -125,6 +126,116 @@ fn scheduled_enqueue_writes_task_hash_and_scheduled_zset() {
         .unwrap()
         .as_secs() as f64;
     assert_eq!(score, expected);
+}
+
+#[test]
+fn complete_without_retention_deletes_task_and_releases_unique_lock() {
+    let Some(mut fixture) = RedisFixture::new("complete-done") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+            TaskOption::unique(Duration::from_secs(300)),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let unique_key = fixture.unique_key("email:welcome", b"payload");
+    assert!(
+        fixture
+            .connection
+            .exists::<_, bool>(unique_key.clone())
+            .unwrap()
+    );
+    let dequeued = client
+        .broker_mut()
+        .dequeue(&[fixture.queue().to_owned()])
+        .unwrap();
+
+    client.broker_mut().complete(dequeued.message()).unwrap();
+
+    assert!(
+        !fixture
+            .connection
+            .exists::<_, bool>(fixture.task_key("task-id"))
+            .unwrap()
+    );
+    let active_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.active_key(), 0, -1)
+        .unwrap();
+    assert!(active_ids.is_empty());
+    let lease_score: Option<f64> = fixture
+        .connection
+        .zscore(fixture.lease_key(), "task-id")
+        .unwrap();
+    assert!(lease_score.is_none());
+    assert!(!fixture.connection.exists::<_, bool>(unique_key).unwrap());
+
+    let processed_total: i64 = fixture
+        .connection
+        .get(fixture.processed_total_key())
+        .unwrap();
+    assert_eq!(processed_total, 1);
+    let daily_keys: Vec<String> = fixture
+        .connection
+        .keys(fixture.processed_daily_key_pattern())
+        .unwrap();
+    assert_eq!(daily_keys.len(), 1);
+    let processed_daily: i64 = fixture.connection.get(&daily_keys[0]).unwrap();
+    assert_eq!(processed_daily, 1);
+}
+
+#[test]
+fn complete_with_retention_moves_task_to_completed_set() {
+    let Some(mut fixture) = RedisFixture::new("complete-retained") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+            TaskOption::retention(Duration::from_secs(300)),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let dequeued = client
+        .broker_mut()
+        .dequeue(&[fixture.queue().to_owned()])
+        .unwrap();
+
+    client.broker_mut().complete(dequeued.message()).unwrap();
+
+    let task_key = fixture.task_key("task-id");
+    let stored: HashMap<String, Vec<u8>> = fixture.connection.hgetall(&task_key).unwrap();
+    assert_eq!(string_field(&stored, "state"), "completed");
+    let completed_msg = decode_msg(stored.get("msg").unwrap());
+    assert!(completed_msg.completed_at > 0);
+    let completed_score: f64 = fixture
+        .connection
+        .zscore(fixture.completed_key(), "task-id")
+        .unwrap();
+    assert_eq!(completed_score as i64, completed_msg.completed_at + 300);
+
+    let active_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.active_key(), 0, -1)
+        .unwrap();
+    assert!(active_ids.is_empty());
+    let lease_score: Option<f64> = fixture
+        .connection
+        .zscore(fixture.lease_key(), "task-id")
+        .unwrap();
+    assert!(lease_score.is_none());
 }
 
 #[test]
@@ -266,6 +377,18 @@ impl RedisFixture {
 
     fn lease_key(&self) -> String {
         format!("asynq:{{{}}}:lease", self.queue)
+    }
+
+    fn completed_key(&self) -> String {
+        format!("asynq:{{{}}}:completed", self.queue)
+    }
+
+    fn processed_total_key(&self) -> String {
+        format!("asynq:{{{}}}:processed", self.queue)
+    }
+
+    fn processed_daily_key_pattern(&self) -> String {
+        format!("asynq:{{{}}}:processed:*", self.queue)
     }
 
     fn scheduled_key(&self) -> String {

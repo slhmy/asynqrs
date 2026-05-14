@@ -1,10 +1,11 @@
 use std::time::SystemTime;
 
 use crate::{
-    Broker, BrokerError, Clock, DecodeTaskMessageError, DequeueBroker, DequeueError, DequeuedTask,
-    EnqueuePlan, RedisDequeueCall, RedisDequeuePlan, RedisDequeuePlanError, RedisEnqueueOperation,
-    RedisEnqueuePlan, RedisEnqueuePlanError, RedisScript, RedisScriptCall, RedisScriptCallError,
-    RedisScriptResult, SystemClock, TaskMessage,
+    Broker, BrokerError, Clock, CompleteBroker, CompleteError, DecodeTaskMessageError,
+    DequeueBroker, DequeueError, DequeuedTask, EnqueuePlan, RedisCompletePlan,
+    RedisCompletePlanError, RedisDequeueCall, RedisDequeuePlan, RedisDequeuePlanError,
+    RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError, RedisScript, RedisScriptCall,
+    RedisScriptCallError, RedisScriptResult, SystemClock, TaskMessage,
 };
 
 /// Minimal executor surface needed by `RedisBroker`.
@@ -21,6 +22,8 @@ pub trait RedisExecutor {
         &mut self,
         call: &RedisDequeueCall,
     ) -> Result<Option<Vec<u8>>, RedisExecutorError>;
+
+    fn eval_script_status(&mut self, call: &RedisScriptCall) -> Result<String, RedisExecutorError>;
 }
 
 #[derive(Debug, Clone)]
@@ -38,10 +41,12 @@ pub struct RedisExecutorError {
 pub enum RedisBrokerError {
     Plan(RedisEnqueuePlanError),
     DequeuePlan(RedisDequeuePlanError),
+    CompletePlan(RedisCompletePlanError),
     ScriptCall(RedisScriptCallError),
     Executor(RedisExecutorError),
     Decode(DecodeTaskMessageError),
     UnexpectedScriptResult { script: RedisScript, result: i64 },
+    UnexpectedScriptStatus { script: RedisScript, status: String },
 }
 
 impl<E> RedisBroker<E, SystemClock> {
@@ -85,6 +90,16 @@ where
 {
     fn dequeue(&mut self, queues: &[String]) -> Result<DequeuedTask, DequeueError> {
         self.dequeue_with_now(queues, self.clock.now())
+    }
+}
+
+impl<E, C> CompleteBroker for RedisBroker<E, C>
+where
+    E: RedisExecutor,
+    C: Clock,
+{
+    fn complete(&mut self, message: &TaskMessage) -> Result<(), CompleteError> {
+        self.complete_with_now(message, self.clock.now())
     }
 }
 
@@ -160,6 +175,35 @@ where
 
         Err(DequeueError::NoProcessableTask)
     }
+
+    pub fn complete_with_now(
+        &mut self,
+        message: &TaskMessage,
+        now: SystemTime,
+    ) -> Result<(), CompleteError> {
+        let redis_plan = RedisCompletePlan::from_message(message, now)
+            .map_err(RedisBrokerError::CompletePlan)
+            .map_err(CompleteError::from)?;
+        let call = redis_plan.call();
+        call.validate()
+            .map_err(RedisBrokerError::ScriptCall)
+            .map_err(CompleteError::from)?;
+        let status = self
+            .executor
+            .eval_script_status(call)
+            .map_err(RedisBrokerError::Executor)
+            .map_err(CompleteError::from)?;
+        if status == "OK" {
+            Ok(())
+        } else {
+            Err(CompleteError::from(
+                RedisBrokerError::UnexpectedScriptStatus {
+                    script: call.script(),
+                    status,
+                },
+            ))
+        }
+    }
 }
 
 fn map_script_result(call: &RedisScriptCall, result: i64) -> Result<(), BrokerError> {
@@ -201,11 +245,15 @@ impl std::fmt::Display for RedisBrokerError {
         match self {
             Self::Plan(error) => write!(f, "failed to build Redis enqueue plan: {error}"),
             Self::DequeuePlan(error) => write!(f, "failed to build Redis dequeue plan: {error}"),
+            Self::CompletePlan(error) => write!(f, "failed to build Redis complete plan: {error}"),
             Self::ScriptCall(error) => write!(f, "invalid Redis script call: {error}"),
             Self::Executor(error) => write!(f, "Redis executor failed: {error}"),
             Self::Decode(error) => write!(f, "failed to decode dequeued task message: {error}"),
             Self::UnexpectedScriptResult { script, result } => {
                 write!(f, "unexpected {script:?} script result: {result}")
+            }
+            Self::UnexpectedScriptStatus { script, status } => {
+                write!(f, "unexpected {script:?} script status: {status}")
             }
         }
     }
@@ -216,10 +264,11 @@ impl std::error::Error for RedisBrokerError {
         match self {
             Self::Plan(error) => Some(error),
             Self::DequeuePlan(error) => Some(error),
+            Self::CompletePlan(error) => Some(error),
             Self::ScriptCall(error) => Some(error),
             Self::Executor(error) => Some(error),
             Self::Decode(error) => Some(error),
-            Self::UnexpectedScriptResult { .. } => None,
+            Self::UnexpectedScriptResult { .. } | Self::UnexpectedScriptStatus { .. } => None,
         }
     }
 }
@@ -233,6 +282,12 @@ impl From<RedisEnqueuePlanError> for RedisBrokerError {
 impl From<RedisDequeuePlanError> for RedisBrokerError {
     fn from(error: RedisDequeuePlanError) -> Self {
         Self::DequeuePlan(error)
+    }
+}
+
+impl From<RedisCompletePlanError> for RedisBrokerError {
+    fn from(error: RedisCompletePlanError) -> Self {
+        Self::CompletePlan(error)
     }
 }
 
@@ -259,11 +314,15 @@ impl From<RedisBrokerError> for BrokerError {
         match error {
             RedisBrokerError::Plan(error) => Self::Other(error.to_string()),
             RedisBrokerError::DequeuePlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::CompletePlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::ScriptCall(error) => Self::Other(error.to_string()),
             RedisBrokerError::Executor(error) => Self::Other(error.to_string()),
             RedisBrokerError::Decode(error) => Self::Other(error.to_string()),
             RedisBrokerError::UnexpectedScriptResult { script, result } => {
                 Self::Other(format!("unexpected {script:?} script result: {result}"))
+            }
+            RedisBrokerError::UnexpectedScriptStatus { script, status } => {
+                Self::Other(format!("unexpected {script:?} script status: {status}"))
             }
         }
     }
@@ -273,12 +332,38 @@ impl From<RedisBrokerError> for DequeueError {
     fn from(error: RedisBrokerError) -> Self {
         match error {
             RedisBrokerError::DequeuePlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::CompletePlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::ScriptCall(error) => Self::Other(error.to_string()),
             RedisBrokerError::Executor(error) => Self::Other(error.to_string()),
             RedisBrokerError::Decode(error) => Self::Other(error.to_string()),
             RedisBrokerError::Plan(error) => Self::Other(error.to_string()),
             RedisBrokerError::UnexpectedScriptResult { script, result } => {
                 Self::Other(format!("unexpected {script:?} script result: {result}"))
+            }
+            RedisBrokerError::UnexpectedScriptStatus { script, status } => {
+                Self::Other(format!("unexpected {script:?} script status: {status}"))
+            }
+        }
+    }
+}
+
+impl From<RedisBrokerError> for CompleteError {
+    fn from(error: RedisBrokerError) -> Self {
+        match error {
+            RedisBrokerError::Executor(error) if error.message().contains("NOT FOUND") => {
+                Self::NotFound
+            }
+            RedisBrokerError::CompletePlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::ScriptCall(error) => Self::Other(error.to_string()),
+            RedisBrokerError::Executor(error) => Self::Other(error.to_string()),
+            RedisBrokerError::Plan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::DequeuePlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::Decode(error) => Self::Other(error.to_string()),
+            RedisBrokerError::UnexpectedScriptResult { script, result } => {
+                Self::Other(format!("unexpected {script:?} script result: {result}"))
+            }
+            RedisBrokerError::UnexpectedScriptStatus { script, status } => {
+                Self::Other(format!("unexpected {script:?} script status: {status}"))
             }
         }
     }
@@ -307,6 +392,11 @@ mod tests {
             keys: Vec<String>,
             args: Vec<RedisArg>,
         },
+        EvalScriptStatus {
+            script: RedisScript,
+            keys: Vec<String>,
+            args: Vec<RedisArg>,
+        },
     }
 
     #[derive(Debug)]
@@ -314,6 +404,7 @@ mod tests {
         calls: Vec<ExecutorCall>,
         script_int_results: Vec<i64>,
         script_bytes_results: Vec<Option<Vec<u8>>>,
+        script_status_results: Vec<String>,
         sadd_error: Option<RedisExecutorError>,
         script_error: Option<RedisExecutorError>,
     }
@@ -324,6 +415,7 @@ mod tests {
                 calls: Vec::new(),
                 script_int_results: vec![1],
                 script_bytes_results: Vec::new(),
+                script_status_results: vec!["OK".to_owned()],
                 sadd_error: None,
                 script_error: None,
             }
@@ -367,6 +459,21 @@ mod tests {
                 return Err(error);
             }
             Ok(self.script_bytes_results.remove(0))
+        }
+
+        fn eval_script_status(
+            &mut self,
+            call: &RedisScriptCall,
+        ) -> Result<String, RedisExecutorError> {
+            self.calls.push(ExecutorCall::EvalScriptStatus {
+                script: call.script(),
+                keys: call.keys().to_vec(),
+                args: call.args().to_vec(),
+            });
+            if let Some(error) = self.script_error.clone() {
+                return Err(error);
+            }
+            Ok(self.script_status_results.remove(0))
         }
     }
 
@@ -562,6 +669,83 @@ mod tests {
         let error = broker.dequeue(&["critical".to_owned()]).unwrap_err();
 
         assert_eq!(error, DequeueError::Other("connection closed".to_owned()));
+    }
+
+    #[test]
+    fn completes_zero_retention_task_with_done_script() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
+        msg.id = "task-id".to_owned();
+        msg.queue = "critical".to_owned();
+        let mut broker = RedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
+
+        broker.complete(&msg).unwrap();
+
+        let calls = &broker.executor().calls;
+        assert_eq!(calls.len(), 1);
+        let ExecutorCall::EvalScriptStatus { script, keys, args } = &calls[0] else {
+            panic!("expected complete script call");
+        };
+        assert_eq!(*script, RedisScript::Done);
+        assert_eq!(
+            keys,
+            &[
+                "asynq:{critical}:active".to_owned(),
+                "asynq:{critical}:lease".to_owned(),
+                "asynq:{critical}:t:task-id".to_owned(),
+                "asynq:{critical}:processed:2023-11-14".to_owned(),
+                "asynq:{critical}:processed".to_owned(),
+            ]
+        );
+        assert_eq!(args[0], RedisArg::String("task-id".to_owned()));
+    }
+
+    #[test]
+    fn completes_retained_task_with_mark_as_complete_script() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
+        msg.id = "task-id".to_owned();
+        msg.queue = "critical".to_owned();
+        msg.retention = 300;
+        let mut broker = RedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
+
+        broker.complete(&msg).unwrap();
+
+        let ExecutorCall::EvalScriptStatus { script, keys, args } = &broker.executor().calls[0]
+        else {
+            panic!("expected complete script call");
+        };
+        assert_eq!(*script, RedisScript::MarkAsComplete);
+        assert_eq!(
+            keys,
+            &[
+                "asynq:{critical}:active".to_owned(),
+                "asynq:{critical}:lease".to_owned(),
+                "asynq:{critical}:completed".to_owned(),
+                "asynq:{critical}:t:task-id".to_owned(),
+                "asynq:{critical}:processed:2023-11-14".to_owned(),
+                "asynq:{critical}:processed".to_owned(),
+            ]
+        );
+        assert_eq!(args[2], RedisArg::I64(1_700_000_300));
+        assert!(matches!(args[3], RedisArg::Bytes(_)));
+    }
+
+    #[test]
+    fn complete_maps_not_found_errors() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
+        msg.id = "task-id".to_owned();
+        msg.queue = "critical".to_owned();
+        let executor = FakeExecutor {
+            script_error: Some(RedisExecutorError::new("redis eval error: NOT FOUND")),
+            ..FakeExecutor::default()
+        };
+        let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+
+        let error = broker.complete(&msg).unwrap_err();
+
+        assert_eq!(error, CompleteError::NotFound);
     }
 
     #[derive(Debug, Clone, Copy)]
