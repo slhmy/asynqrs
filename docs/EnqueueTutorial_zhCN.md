@@ -286,10 +286,14 @@ let mut client = Client::new(broker);
 - Redis 连接池封装。当前已有 `RedisConnectionProvider` 边界，可以给池类型
   实现该 trait。
 - 完整 worker server 主循环。
-- worker 侧 retry、archive、lease 续约、lease 过期恢复和 completed task 清理。
+- worker 侧已实现 dequeue、complete、retry、archive、forward、recover 和
+  lease extension 的 broker 级能力，但还没有 worker server 主循环和对应
+  定时后台组件。
+- completed task 清理。
 - `ResultWriter` 等 worker 执行期能力。
 
-下一步比较自然的是继续补 worker 侧失败路径，或做真正连接池适配：
+下一步比较自然的是把这些 broker 能力串成 worker/server 后台循环，或做
+真正连接池适配：
 
 当前已有 Redis 集成测试，可以这样运行：
 
@@ -298,8 +302,8 @@ cargo test --test redis_enqueue
 ```
 
 这些测试覆盖 pending、scheduled、unique、group 入队路径，以及 dequeue 后
-complete 的成功路径。后续可以继续补：
+complete/retry/archive/forward/recover/extend lease 路径。后续可以继续补：
 
-1. worker 侧 retry、archive、lease 续约和 lease 过期恢复。
+1. worker server / processor 主循环。
 2. async runtime 和连接池实现。
 3. completed task 过期清理。

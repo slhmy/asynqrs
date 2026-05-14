@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use asynq_rs::{
     ArchiveBroker, BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, ForwardBroker,
-    RecoverBroker, RedisBroker, RedisConnectionExecutor, RedisScript, RedisScriptResult,
-    RetryBroker, Task, TaskMessage, TaskOption, TaskState,
+    LeaseBroker, RecoverBroker, RedisBroker, RedisConnectionExecutor, RedisScript,
+    RedisScriptResult, RetryBroker, Task, TaskMessage, TaskOption, TaskState,
 };
 use redis::Commands;
 use testcontainers_modules::{
@@ -606,6 +606,54 @@ fn recover_expired_leases_routes_tasks_to_retry_or_archive() {
     let failed_total: i64 = fixture.connection.get(fixture.failed_total_key()).unwrap();
     assert_eq!(processed_total, 2);
     assert_eq!(failed_total, 2);
+}
+
+#[test]
+fn extend_lease_updates_existing_active_lease_only() {
+    let Some(mut fixture) = RedisFixture::new("extend-lease") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let dequeued = client
+        .broker_mut()
+        .dequeue(&[fixture.queue().to_owned()])
+        .unwrap();
+    let original_score: f64 = fixture
+        .connection
+        .zscore(fixture.lease_key(), "task-id")
+        .unwrap();
+    let extension = client
+        .broker_mut()
+        .extend_lease(fixture.queue(), &dequeued.message().id)
+        .unwrap();
+
+    assert!(extension.expires_at() > dequeued.lease_expires_at());
+    let extended_score: f64 = fixture
+        .connection
+        .zscore(fixture.lease_key(), "task-id")
+        .unwrap();
+    assert!(extended_score >= original_score);
+    client.broker_mut().complete(dequeued.message()).unwrap();
+    let missing_extension = client
+        .broker_mut()
+        .extend_lease(fixture.queue(), &dequeued.message().id)
+        .unwrap();
+    assert!(missing_extension.expires_at() > dequeued.lease_expires_at());
+    let lease_score: Option<f64> = fixture
+        .connection
+        .zscore(fixture.lease_key(), "task-id")
+        .unwrap();
+    assert!(lease_score.is_none());
 }
 
 #[test]

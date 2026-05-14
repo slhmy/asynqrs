@@ -616,7 +616,8 @@ mod tests {
 
     use crate::{
         EnqueuePlan, RedisArchivePlan, RedisCompletePlan, RedisEnqueueOperation, RedisEnqueuePlan,
-        RedisForwardPlan, RedisRecoverPlan, RedisRetryPlan, Task, TaskMessage, TaskOption,
+        RedisExtendLeasePlan, RedisForwardPlan, RedisRecoverPlan, RedisRetryPlan, Task,
+        TaskMessage, TaskOption,
     };
 
     #[test]
@@ -889,6 +890,18 @@ mod tests {
             .call()
             .validate()
             .unwrap();
+    }
+
+    #[test]
+    fn redis_extend_lease_plan_has_no_script_shape() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let plan =
+            RedisExtendLeasePlan::from_queue_and_task_id("critical", "task-id", now).unwrap();
+
+        assert_eq!(plan.key(), "asynq:{critical}:lease");
+        assert_eq!(plan.task_id(), "task-id");
+        assert_eq!(plan.lease_expires_at_seconds(), 1_700_000_030);
     }
 
     fn active_message(retention: i64, unique_key: &str) -> TaskMessage {

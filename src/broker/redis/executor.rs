@@ -42,6 +42,8 @@ pub trait RedisCommandExecutor {
 
     fn sadd(&mut self, key: &str, member: &str) -> Result<(), Self::Error>;
 
+    fn zadd_existing(&mut self, key: &str, score: i64, member: &str) -> Result<usize, Self::Error>;
+
     fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, Self::Error>;
 
     fn eval_script_bytes(
@@ -99,6 +101,15 @@ where
         self.with_connection(|connection| connection.sadd(key, member))
     }
 
+    fn zadd_existing(
+        &mut self,
+        key: &str,
+        score: i64,
+        member: &str,
+    ) -> Result<usize, RedisExecutorError> {
+        self.with_connection(|connection| connection.zadd_existing(key, score, member))
+    }
+
     fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, RedisExecutorError> {
         self.with_connection(|connection| connection.eval_script_int(call))
     }
@@ -147,6 +158,17 @@ where
     fn sadd(&mut self, key: &str, member: &str) -> Result<(), RedisExecutorError> {
         self.connection
             .sadd(key, member)
+            .map_err(redis_executor_error)
+    }
+
+    fn zadd_existing(
+        &mut self,
+        key: &str,
+        score: i64,
+        member: &str,
+    ) -> Result<usize, RedisExecutorError> {
+        self.connection
+            .zadd_existing(key, score, member)
             .map_err(redis_executor_error)
     }
 
@@ -199,6 +221,15 @@ where
     fn sadd(&mut self, key: &str, member: &str) -> Result<(), Self::Error> {
         let _: usize = redis::cmd("SADD").arg(key).arg(member).query(self)?;
         Ok(())
+    }
+
+    fn zadd_existing(&mut self, key: &str, score: i64, member: &str) -> Result<usize, Self::Error> {
+        redis::cmd("ZADD")
+            .arg(key)
+            .arg("XX")
+            .arg(score)
+            .arg(member)
+            .query(self)
     }
 
     fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, Self::Error> {
@@ -295,6 +326,23 @@ mod tests {
                 return Err(FakeError(error.clone()));
             }
             Ok(())
+        }
+
+        fn zadd_existing(
+            &mut self,
+            key: &str,
+            score: i64,
+            member: &str,
+        ) -> Result<usize, Self::Error> {
+            self.script_int_calls.push((
+                RedisScript::ListLeaseExpired,
+                vec![key.to_owned(), member.to_owned()],
+                vec![RedisArg::I64(score)],
+            ));
+            if let Some(error) = &self.script_error {
+                return Err(FakeError(error.clone()));
+            }
+            Ok(1)
         }
 
         fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, Self::Error> {
@@ -477,6 +525,11 @@ mod tests {
             key: String,
             member: String,
         },
+        ZaddExisting {
+            key: String,
+            score: i64,
+            member: String,
+        },
         EvalScriptInt {
             script: RedisScript,
             keys: Vec<String>,
@@ -544,6 +597,23 @@ mod tests {
                 return Err(FakeError(error.clone()));
             }
             Ok(())
+        }
+
+        fn zadd_existing(
+            &mut self,
+            key: &str,
+            score: i64,
+            member: &str,
+        ) -> Result<usize, Self::Error> {
+            self.calls.borrow_mut().push(ProviderCall::ZaddExisting {
+                key: key.to_owned(),
+                score,
+                member: member.to_owned(),
+            });
+            if let Some(error) = &self.command_error {
+                return Err(FakeError(error.clone()));
+            }
+            Ok(1)
         }
 
         fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, Self::Error> {

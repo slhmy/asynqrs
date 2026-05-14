@@ -2,6 +2,17 @@
 
 ## 2026-05-14
 
+- Added lease extension: `LeaseBroker`, `LeaseError`, `LeaseExtension`,
+  `RedisExtendLeasePlan`, and `RedisBroker::extend_lease`.
+- Redis lease extension now mirrors Asynq v0.26.0 `RDB.ExtendLease` by using
+  `ZADD XX` against the queue `lease` sorted set, returning the computed new
+  expiration time without creating missing lease entries.
+- Covered lease extension with unit and Redis integration tests, including the
+  completed-task case where extending does not recreate a lease.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go
+- TODO: Add the worker-side lease extender loop once `Server` / `Processor`
+  handler execution is modeled.
+
 - Added lease-expiration recovery: `RecoverBroker`, `RecoverError`,
   `RecoverResult`, `RedisRecoverPlan`, `RedisBroker::recover_expired_leases`,
   and the fixed Asynq v0.26.0 `listLeaseExpired` Lua script.
@@ -12,8 +23,8 @@
   active leases moving to retry/archive while active/lease entries are cleared.
 - Reference: https://github.com/hibiken/asynq/blob/v0.26.0/recoverer.go
 - Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go
-- TODO: Add lease extension, the server-side recoverer polling loop, default
-  retry delay calculation, and stale aggregation-set recovery.
+- TODO: Add the server-side recoverer polling loop, default retry delay
+  calculation, and stale aggregation-set recovery.
 
 - Added scheduled/retry forwarding: `ForwardBroker`, `ForwardError`,
   `RedisForwardPlan`, `RedisBroker::forward_scheduled`,

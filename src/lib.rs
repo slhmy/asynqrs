@@ -6,6 +6,7 @@ mod dequeue;
 mod enqueue;
 mod forward;
 pub mod keys;
+mod lease;
 mod message;
 mod options;
 pub mod pb;
@@ -21,9 +22,10 @@ pub use broker::redis::{
     RedisCompletePlanError, RedisConnectionExecutor, RedisConnectionProvider,
     RedisConnectionProviderExecutor, RedisDequeueCall, RedisDequeuePlan, RedisDequeuePlanError,
     RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError, RedisExecutor,
-    RedisExecutorError, RedisForwardPlan, RedisForwardPlanError, RedisRecoverPlan,
-    RedisRecoverPlanError, RedisRetryPlan, RedisRetryPlanError, RedisScript, RedisScriptCall,
-    RedisScriptCallError, RedisScriptResult, RedisScriptSpec, STATS_TTL,
+    RedisExecutorError, RedisExtendLeasePlan, RedisExtendLeasePlanError, RedisForwardPlan,
+    RedisForwardPlanError, RedisRecoverPlan, RedisRecoverPlanError, RedisRetryPlan,
+    RedisRetryPlanError, RedisScript, RedisScriptCall, RedisScriptCallError, RedisScriptResult,
+    RedisScriptSpec, STATS_TTL,
 };
 pub use client::{
     Broker, BrokerError, Client, ClientError, Clock, EnqueueResult, SystemClock, TaskIdGenerator,
@@ -33,6 +35,7 @@ pub use complete::{CompleteBroker, CompleteError};
 pub use dequeue::{DequeueBroker, DequeueError, DequeuedTask};
 pub use enqueue::{DEFAULT_MAX_RETRY, DEFAULT_TIMEOUT, EnqueuePlan, EnqueuePlanError};
 pub use forward::{ForwardBroker, ForwardError};
+pub use lease::{LeaseBroker, LeaseError, LeaseExtension};
 pub use message::{DecodeTaskMessageError, TaskMessage};
 pub use options::TaskOption;
 pub use recover::{RecoverBroker, RecoverError, RecoverResult};

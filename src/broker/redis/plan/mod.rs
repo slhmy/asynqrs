@@ -83,6 +83,18 @@ pub struct RedisRecoverPlan {
     call: RedisScriptCall,
 }
 
+/// Redis command intent for extending an active task lease.
+///
+/// Reference: Asynq v0.26.0 `RDB.ExtendLease`:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go>.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedisExtendLeasePlan {
+    key: String,
+    task_id: String,
+    lease_expires_at: SystemTime,
+    lease_expires_at_seconds: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedisEnqueueOperation {
     PublishQueue { key: String, queue: String },
@@ -180,6 +192,13 @@ pub enum RedisForwardPlanError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedisRecoverPlanError {
     EmptyQueueName,
+    TimeOverflow(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedisExtendLeasePlanError {
+    EmptyQueueName,
+    EmptyTaskId,
     TimeOverflow(&'static str),
 }
 
@@ -365,6 +384,50 @@ impl RedisRecoverPlan {
 
     pub fn call(&self) -> &RedisScriptCall {
         &self.call
+    }
+}
+
+impl RedisExtendLeasePlan {
+    pub fn from_queue_and_task_id(
+        queue: &str,
+        task_id: &str,
+        now: SystemTime,
+    ) -> Result<Self, RedisExtendLeasePlanError> {
+        if queue.trim().is_empty() {
+            return Err(RedisExtendLeasePlanError::EmptyQueueName);
+        }
+        if task_id.trim().is_empty() {
+            return Err(RedisExtendLeasePlanError::EmptyTaskId);
+        }
+
+        let lease_expires_at = now.checked_add(DEFAULT_LEASE_DURATION).ok_or(
+            RedisExtendLeasePlanError::TimeOverflow("lease extension expiration"),
+        )?;
+        let lease_expires_at_seconds =
+            unix_seconds_extend_lease(lease_expires_at, "lease extension")?;
+
+        Ok(Self {
+            key: keys::lease_key(queue),
+            task_id: task_id.to_owned(),
+            lease_expires_at,
+            lease_expires_at_seconds,
+        })
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    pub fn lease_expires_at(&self) -> SystemTime {
+        self.lease_expires_at
+    }
+
+    pub fn lease_expires_at_seconds(&self) -> i64 {
+        self.lease_expires_at_seconds
     }
 }
 
@@ -857,6 +920,19 @@ fn unix_seconds_recover(
         .map_err(|_| RedisRecoverPlanError::TimeOverflow(context))
 }
 
+fn unix_seconds_extend_lease(
+    time: SystemTime,
+    context: &'static str,
+) -> Result<i64, RedisExtendLeasePlanError> {
+    let seconds = match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i128::from(duration_seconds(duration)),
+        Err(error) => -i128::from(duration_seconds(error.duration())),
+    };
+    seconds
+        .try_into()
+        .map_err(|_| RedisExtendLeasePlanError::TimeOverflow(context))
+}
+
 fn duration_nanoseconds(duration: Duration) -> i128 {
     i128::from(duration.as_secs()) * 1_000_000_000 + i128::from(duration.subsec_nanos())
 }
@@ -949,6 +1025,18 @@ impl std::fmt::Display for RedisRecoverPlanError {
 }
 
 impl std::error::Error for RedisRecoverPlanError {}
+
+impl std::fmt::Display for RedisExtendLeasePlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
+            Self::EmptyTaskId => f.write_str("task id must contain one or more characters"),
+            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
+        }
+    }
+}
+
+impl std::error::Error for RedisExtendLeasePlanError {}
 
 #[cfg(test)]
 mod tests {
@@ -1468,6 +1556,36 @@ mod tests {
         assert_eq!(
             RedisRecoverPlan::from_queue(" ", now).unwrap_err(),
             RedisRecoverPlanError::EmptyQueueName
+        );
+    }
+
+    #[test]
+    fn plans_extend_lease_command() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let plan =
+            RedisExtendLeasePlan::from_queue_and_task_id("critical", "task-id", now).unwrap();
+
+        assert_eq!(plan.key(), "asynq:{critical}:lease");
+        assert_eq!(plan.task_id(), "task-id");
+        assert_eq!(
+            plan.lease_expires_at(),
+            UNIX_EPOCH + Duration::from_secs(1_700_000_030)
+        );
+        assert_eq!(plan.lease_expires_at_seconds(), 1_700_000_030);
+    }
+
+    #[test]
+    fn validates_extend_lease_inputs() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        assert_eq!(
+            RedisExtendLeasePlan::from_queue_and_task_id(" ", "task-id", now).unwrap_err(),
+            RedisExtendLeasePlanError::EmptyQueueName
+        );
+        assert_eq!(
+            RedisExtendLeasePlan::from_queue_and_task_id("critical", " ", now).unwrap_err(),
+            RedisExtendLeasePlanError::EmptyTaskId
         );
     }
 
