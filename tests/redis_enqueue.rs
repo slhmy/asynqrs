@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use asynq_rs::{
     ArchiveBroker, BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, ForwardBroker,
-    RedisBroker, RedisConnectionExecutor, RedisScript, RedisScriptResult, RetryBroker, Task,
-    TaskMessage, TaskOption, TaskState,
+    RecoverBroker, RedisBroker, RedisConnectionExecutor, RedisScript, RedisScriptResult,
+    RetryBroker, Task, TaskMessage, TaskOption, TaskState,
 };
 use redis::Commands;
 use testcontainers_modules::{
@@ -491,6 +491,121 @@ fn archive_moves_active_task_to_archived_set_and_records_failure_stats() {
     let failed_total: i64 = fixture.connection.get(fixture.failed_total_key()).unwrap();
     assert_eq!(processed_total, 1);
     assert_eq!(failed_total, 1);
+}
+
+#[test]
+fn recover_expired_leases_routes_tasks_to_retry_or_archive() {
+    let Some(mut fixture) = RedisFixture::new("recover") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let retry_task = Task::new_with_options(
+        "email:welcome",
+        b"retry".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("retry-id"),
+            TaskOption::max_retry(5),
+        ],
+    );
+    let archive_task = Task::new_with_options(
+        "email:welcome",
+        b"archive".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("archive-id"),
+            TaskOption::max_retry(0),
+        ],
+    );
+
+    client.enqueue(&retry_task).unwrap();
+    client.enqueue(&archive_task).unwrap();
+    let retry_dequeued = client
+        .broker_mut()
+        .dequeue(&[fixture.queue().to_owned()])
+        .unwrap();
+    let archive_dequeued = client
+        .broker_mut()
+        .dequeue(&[fixture.queue().to_owned()])
+        .unwrap();
+    let _: usize = fixture
+        .connection
+        .zadd(fixture.lease_key(), retry_dequeued.message().id.as_str(), 0)
+        .unwrap();
+    let _: usize = fixture
+        .connection
+        .zadd(
+            fixture.lease_key(),
+            archive_dequeued.message().id.as_str(),
+            0,
+        )
+        .unwrap();
+    let result = client
+        .broker_mut()
+        .recover_expired_leases(
+            fixture.queue(),
+            std::time::SystemTime::now() + Duration::from_secs(60),
+            "lease expired",
+        )
+        .unwrap();
+
+    assert_eq!(result.retried(), 1);
+    assert_eq!(result.archived(), 1);
+    let retry_fields: HashMap<String, Vec<u8>> = fixture
+        .connection
+        .hgetall(fixture.task_key("retry-id"))
+        .unwrap();
+    let retry_msg = decode_msg(retry_fields.get("msg").unwrap());
+    assert_eq!(string_field(&retry_fields, "state"), "retry");
+    assert_eq!(retry_msg.retried, 1);
+    assert_eq!(retry_msg.error_msg, "lease expired");
+    assert!(retry_msg.last_failed_at > 0);
+    let retry_score: f64 = fixture
+        .connection
+        .zscore(fixture.retry_key(), "retry-id")
+        .unwrap();
+    assert!(retry_score > 0.0);
+    let archive_fields: HashMap<String, Vec<u8>> = fixture
+        .connection
+        .hgetall(fixture.task_key("archive-id"))
+        .unwrap();
+    let archive_msg = decode_msg(archive_fields.get("msg").unwrap());
+    assert_eq!(string_field(&archive_fields, "state"), "archived");
+    assert_eq!(archive_msg.retried, 1);
+    assert_eq!(archive_msg.error_msg, "lease expired");
+    assert!(archive_msg.last_failed_at > 0);
+    let archived_score: f64 = fixture
+        .connection
+        .zscore(fixture.archived_key(), "archive-id")
+        .unwrap();
+    assert!(archived_score > 0.0);
+    let pending_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.pending_key(), 0, -1)
+        .unwrap();
+    assert!(pending_ids.is_empty());
+    let active_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.active_key(), 0, -1)
+        .unwrap();
+    assert!(active_ids.is_empty());
+    let retry_lease_score: Option<f64> = fixture
+        .connection
+        .zscore(fixture.lease_key(), "retry-id")
+        .unwrap();
+    let archive_lease_score: Option<f64> = fixture
+        .connection
+        .zscore(fixture.lease_key(), "archive-id")
+        .unwrap();
+    assert!(retry_lease_score.is_none());
+    assert!(archive_lease_score.is_none());
+    let processed_total: i64 = fixture
+        .connection
+        .get(fixture.processed_total_key())
+        .unwrap();
+    let failed_total: i64 = fixture.connection.get(fixture.failed_total_key()).unwrap();
+    assert_eq!(processed_total, 2);
+    assert_eq!(failed_total, 2);
 }
 
 #[test]

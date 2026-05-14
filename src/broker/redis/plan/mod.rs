@@ -74,6 +74,15 @@ pub struct RedisForwardPlan {
     call: RedisScriptCall,
 }
 
+/// Redis command intent for listing active tasks whose leases have expired.
+///
+/// Reference: Asynq v0.26.0 recoverer lease-expired task listing:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go>.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedisRecoverPlan {
+    call: RedisScriptCall,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedisEnqueueOperation {
     PublishQueue { key: String, queue: String },
@@ -114,6 +123,7 @@ pub enum RedisScript {
     Retry,
     Archive,
     Forward,
+    ListLeaseExpired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +173,12 @@ pub enum RedisArchivePlanError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedisForwardPlanError {
+    EmptyQueueName,
+    TimeOverflow(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedisRecoverPlanError {
     EmptyQueueName,
     TimeOverflow(&'static str),
 }
@@ -322,6 +338,29 @@ impl RedisForwardPlan {
 
     pub fn from_retry_queue(queue: &str, now: SystemTime) -> Result<Self, RedisForwardPlanError> {
         forward_plan(queue, keys::retry_key(queue), now)
+    }
+
+    pub fn call(&self) -> &RedisScriptCall {
+        &self.call
+    }
+}
+
+impl RedisRecoverPlan {
+    pub fn from_queue(queue: &str, now: SystemTime) -> Result<Self, RedisRecoverPlanError> {
+        if queue.trim().is_empty() {
+            return Err(RedisRecoverPlanError::EmptyQueueName);
+        }
+
+        Ok(Self {
+            call: RedisScriptCall::new(
+                RedisScript::ListLeaseExpired,
+                vec![keys::lease_key(queue), keys::task_key_prefix(queue)],
+                vec![RedisArg::I64(unix_seconds_recover(
+                    now,
+                    "lease expiration scan",
+                )?)],
+            ),
+        })
     }
 
     pub fn call(&self) -> &RedisScriptCall {
@@ -805,6 +844,19 @@ fn unix_nanoseconds_forward(time: SystemTime) -> Result<i64, RedisForwardPlanErr
         .map_err(|_| RedisForwardPlanError::TimeOverflow("unix nanoseconds"))
 }
 
+fn unix_seconds_recover(
+    time: SystemTime,
+    context: &'static str,
+) -> Result<i64, RedisRecoverPlanError> {
+    let seconds = match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i128::from(duration_seconds(duration)),
+        Err(error) => -i128::from(duration_seconds(error.duration())),
+    };
+    seconds
+        .try_into()
+        .map_err(|_| RedisRecoverPlanError::TimeOverflow(context))
+}
+
 fn duration_nanoseconds(duration: Duration) -> i128 {
     i128::from(duration.as_secs()) * 1_000_000_000 + i128::from(duration.subsec_nanos())
 }
@@ -886,6 +938,17 @@ impl std::fmt::Display for RedisForwardPlanError {
 }
 
 impl std::error::Error for RedisForwardPlanError {}
+
+impl std::fmt::Display for RedisRecoverPlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
+            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
+        }
+    }
+}
+
+impl std::error::Error for RedisRecoverPlanError {}
 
 #[cfg(test)]
 mod tests {
@@ -1377,6 +1440,34 @@ mod tests {
         assert_eq!(
             RedisForwardPlan::from_retry_queue(" ", now).unwrap_err(),
             RedisForwardPlanError::EmptyQueueName
+        );
+    }
+
+    #[test]
+    fn plans_recover_script_for_expired_leases() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let plan = RedisRecoverPlan::from_queue("critical", now).unwrap();
+        let call = plan.call();
+
+        assert_eq!(call.script(), RedisScript::ListLeaseExpired);
+        assert_eq!(
+            call.keys(),
+            &[
+                "asynq:{critical}:lease".to_owned(),
+                "asynq:{critical}:t:".to_owned(),
+            ]
+        );
+        assert_eq!(call.args(), &[RedisArg::I64(1_700_000_000)]);
+    }
+
+    #[test]
+    fn validates_recover_inputs() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        assert_eq!(
+            RedisRecoverPlan::from_queue(" ", now).unwrap_err(),
+            RedisRecoverPlanError::EmptyQueueName
         );
     }
 

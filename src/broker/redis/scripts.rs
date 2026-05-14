@@ -35,7 +35,7 @@ pub enum RedisScriptCallError {
 }
 
 impl RedisScript {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Enqueue,
         Self::EnqueueUnique,
         Self::Schedule,
@@ -50,6 +50,7 @@ impl RedisScript {
         Self::Retry,
         Self::Archive,
         Self::Forward,
+        Self::ListLeaseExpired,
     ];
 
     pub const fn spec(self) -> RedisScriptSpec {
@@ -151,6 +152,13 @@ impl RedisScript {
                 source: FORWARD_SOURCE,
                 key_count: 3,
                 arg_count: 2,
+            },
+            Self::ListLeaseExpired => RedisScriptSpec {
+                script: self,
+                name: "list_lease_expired",
+                source: LIST_LEASE_EXPIRED_SOURCE,
+                key_count: 2,
+                arg_count: 1,
             },
         }
     }
@@ -588,6 +596,19 @@ end
 return table.getn(ids)
 "#;
 
+// Source: Asynq v0.26.0 `listLeaseExpiredCmd`.
+const LIST_LEASE_EXPIRED_SOURCE: &str = r#"
+local res = {}
+local ids = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", ARGV[1])
+for _, id in ipairs(ids) do
+  local msg = redis.call("HGET", KEYS[2] .. id, "msg")
+  if msg then
+    table.insert(res, msg)
+  end
+end
+return res
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,7 +616,7 @@ mod tests {
 
     use crate::{
         EnqueuePlan, RedisArchivePlan, RedisCompletePlan, RedisEnqueueOperation, RedisEnqueuePlan,
-        RedisForwardPlan, RedisRetryPlan, Task, TaskMessage, TaskOption,
+        RedisForwardPlan, RedisRecoverPlan, RedisRetryPlan, Task, TaskMessage, TaskOption,
     };
 
     #[test]
@@ -620,6 +641,7 @@ mod tests {
             (RedisScript::Retry, "retry", 8, 6),
             (RedisScript::Archive, "archive", 8, 6),
             (RedisScript::Forward, "forward", 3, 2),
+            (RedisScript::ListLeaseExpired, "list_lease_expired", 2, 1),
         ];
 
         for (script, name, key_count, arg_count) in expected {
@@ -637,6 +659,10 @@ mod tests {
                 RedisScript::Forward => {
                     assert!(spec.source().contains("ZRANGEBYSCORE"));
                     assert!(spec.source().contains("table.getn"));
+                }
+                RedisScript::ListLeaseExpired => {
+                    assert!(spec.source().contains("ZRANGEBYSCORE"));
+                    assert!(spec.source().contains("HGET"));
                 }
                 RedisScript::Done
                 | RedisScript::DoneUnique
@@ -673,6 +699,7 @@ mod tests {
         assert_eq!(RedisScript::Retry.result_for_code(1), None);
         assert_eq!(RedisScript::Archive.result_for_code(1), None);
         assert_eq!(RedisScript::Forward.result_for_code(1), None);
+        assert_eq!(RedisScript::ListLeaseExpired.result_for_code(1), None);
     }
 
     #[test]
@@ -847,6 +874,17 @@ mod tests {
             .validate()
             .unwrap();
         RedisForwardPlan::from_retry_queue("critical", now)
+            .unwrap()
+            .call()
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
+    fn redis_recover_plan_matches_script_shape() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        RedisRecoverPlan::from_queue("critical", now)
             .unwrap()
             .call()
             .validate()

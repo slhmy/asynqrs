@@ -2,6 +2,19 @@
 
 ## 2026-05-14
 
+- Added lease-expiration recovery: `RecoverBroker`, `RecoverError`,
+  `RecoverResult`, `RedisRecoverPlan`, `RedisBroker::recover_expired_leases`,
+  and the fixed Asynq v0.26.0 `listLeaseExpired` Lua script.
+- Recovery now lists expired active-task leases and routes each task through
+  retry or archive based on `retried >= retry`, updating task state, failure
+  message fields, and processed/failed counters.
+- Covered recover behavior with unit and Redis integration tests for expired
+  active leases moving to retry/archive while active/lease entries are cleared.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/recoverer.go
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go
+- TODO: Add lease extension, the server-side recoverer polling loop, default
+  retry delay calculation, and stale aggregation-set recovery.
+
 - Added scheduled/retry forwarding: `ForwardBroker`, `ForwardError`,
   `RedisForwardPlan`, `RedisBroker::forward_scheduled`,
   `RedisBroker::forward_retry`, and the fixed Asynq v0.26.0 `forward` Lua

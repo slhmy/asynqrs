@@ -1,9 +1,10 @@
-# Worker Dequeue, Complete, Retry, Archive, And Forward
+# Worker Dequeue, Complete, Retry, Archive, Forward, And Recover
 
 这份文档记录当前 worker 侧已经实现的最小生命周期路径：从 Redis pending
 queue 取出一个任务，移动到 active queue，写入 lease；处理成功后完成任务，
 处理失败后把任务移入 retry set，重试耗尽后归档到 archived set；到期的
-scheduled/retry 任务可以被 forward 回 pending。
+scheduled/retry 任务可以被 forward 回 pending；lease 过期的 active 任务
+可以按 retry/archive 规则恢复。
 
 实现参考 Asynq v0.26.0：
 
@@ -17,6 +18,9 @@ scheduled/retry 任务可以被 forward 回 pending。
   <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go>
 - `RDB.ForwardIfReady` / `forwardCmd`：
   <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L861-L900>
+- recoverer lease-expired path / `RDB.ListLeaseExpired`：
+  <https://github.com/hibiken/asynq/blob/v0.26.0/recoverer.go>
+  <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go>
 - `LeaseDuration`：
   <https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L46-L52>
 - `statsTTL`：
@@ -165,10 +169,48 @@ v0.26.0 的 forward 脚本：
 - 已移动的 task id 从源 sorted set 删除。
 - 当前接口每次执行上游一批，最多移动 100 个 task id。
 
+## Recover
+
+`RecoverBroker` 是 worker 崩溃或 lease 过期后的最小恢复接口：
+
+```rust,no_run
+use std::time::{Duration, SystemTime};
+
+use asynq_rs::RecoverBroker;
+
+fn recover_expired<B: RecoverBroker>(broker: &mut B) {
+    let retry_at = SystemTime::now() + Duration::from_secs(60);
+    let result = broker
+        .recover_expired_leases("default", retry_at, "asynq: task lease expired")
+        .unwrap();
+
+    println!(
+        "recovered total={}, retried={}, archived={}",
+        result.total(),
+        result.retried(),
+        result.archived()
+    );
+}
+```
+
+`RedisBroker::recover_expired_leases` 先执行 Asynq v0.26.0 的 lease-expired
+listing 脚本，找出 `lease` sorted set 中已过期的 active task message。
+随后按 recoverer 规则处理：
+
+- `retried < retry`：调用 retry 路径，任务从 `active` / `lease` 移到
+  `retry` sorted set。
+- `retried >= retry`：调用 archive 路径，任务从 `active` / `lease` 移到
+  `archived` sorted set。
+- message 会更新 `retried`、`error_msg`、`last_failed_at`。
+- 当前恢复把 lease-expired 视作 failure，因此会更新 processed/failed counters。
+
+当前接口只恢复单个队列的一次扫描；server-side recoverer 定时循环、30 秒
+clock-skew cutoff、默认 retry delay 计算和 lease extension 还没有建模。
+
 ## Redis 测试
 
 `tests/redis_enqueue.rs` 现在覆盖了 pending enqueue 后的 dequeue、complete、
-retry、archive 和 forward 状态迁移：
+retry、archive、forward 和 recover 状态迁移：
 
 - task hash state 从 `pending` 变成 `active`
 - `pending_since` 被删除
@@ -185,6 +227,8 @@ retry、archive 和 forward 状态迁移：
 - archive 会更新 message 的失败字段，并更新 processed/failed counters
 - forward scheduled/retry 会把到期任务移回 pending
 - 未到期 scheduled/retry 任务不会被移动
+- recover 会把 lease-expired active task 送入 retry 或 archived
+- recover 会清理 active/lease，更新失败字段和 processed/failed counters
 
 本地运行：
 
@@ -198,6 +242,7 @@ CI 会通过 Redis service 设置 `ASYNQ_RS_REDIS_URL`，因此会连接真实 R
 ## 还没实现的部分
 
 - worker `Server` / `Processor` 主循环。
-- lease 续约和 lease 过期恢复。
+- lease 续约。
+- server-side recoverer 定时循环。
 - server-side forwarder 循环。
 - completed task 过期清理。

@@ -12,7 +12,7 @@ pub use plan::{
     DEFAULT_LEASE_DURATION, RedisArchivePlan, RedisArchivePlanError, RedisArg, RedisCompletePlan,
     RedisCompletePlanError, RedisDequeueCall, RedisDequeuePlan, RedisDequeuePlanError,
     RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError, RedisForwardPlan,
-    RedisForwardPlanError, RedisRetryPlan, RedisRetryPlanError, RedisScript, RedisScriptCall,
-    STATS_TTL,
+    RedisForwardPlanError, RedisRecoverPlan, RedisRecoverPlanError, RedisRetryPlan,
+    RedisRetryPlanError, RedisScript, RedisScriptCall, STATS_TTL,
 };
 pub use scripts::{RedisScriptCallError, RedisScriptResult, RedisScriptSpec};

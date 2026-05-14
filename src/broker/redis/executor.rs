@@ -49,6 +49,9 @@ pub trait RedisCommandExecutor {
         call: &RedisDequeueCall,
     ) -> Result<Option<Vec<u8>>, Self::Error>;
 
+    fn eval_script_byte_vec(&mut self, call: &RedisScriptCall)
+    -> Result<Vec<Vec<u8>>, Self::Error>;
+
     fn eval_script_status(&mut self, call: &RedisScriptCall) -> Result<String, Self::Error>;
 }
 
@@ -107,6 +110,13 @@ where
         self.with_connection(|connection| connection.eval_script_bytes(call))
     }
 
+    fn eval_script_byte_vec(
+        &mut self,
+        call: &RedisScriptCall,
+    ) -> Result<Vec<Vec<u8>>, RedisExecutorError> {
+        self.with_connection(|connection| connection.eval_script_byte_vec(call))
+    }
+
     fn eval_script_status(&mut self, call: &RedisScriptCall) -> Result<String, RedisExecutorError> {
         self.with_connection(|connection| connection.eval_script_status(call))
     }
@@ -155,6 +165,15 @@ where
             .map_err(redis_executor_error)
     }
 
+    fn eval_script_byte_vec(
+        &mut self,
+        call: &RedisScriptCall,
+    ) -> Result<Vec<Vec<u8>>, RedisExecutorError> {
+        self.connection
+            .eval_script_byte_vec(call)
+            .map_err(redis_executor_error)
+    }
+
     fn eval_script_status(&mut self, call: &RedisScriptCall) -> Result<String, RedisExecutorError> {
         self.connection
             .eval_script_status(call)
@@ -190,6 +209,13 @@ where
         &mut self,
         call: &RedisDequeueCall,
     ) -> Result<Option<Vec<u8>>, Self::Error> {
+        eval_script(self, call.script(), call.keys(), call.args())
+    }
+
+    fn eval_script_byte_vec(
+        &mut self,
+        call: &RedisScriptCall,
+    ) -> Result<Vec<Vec<u8>>, Self::Error> {
         eval_script(self, call.script(), call.keys(), call.args())
     }
 
@@ -293,6 +319,23 @@ mod tests {
                 return Err(FakeError(error.clone()));
             }
             Ok(self.script_bytes_results.pop().unwrap_or(None))
+        }
+
+        fn eval_script_byte_vec(
+            &mut self,
+            call: &RedisScriptCall,
+        ) -> Result<Vec<Vec<u8>>, Self::Error> {
+            self.script_int_calls
+                .push((call.script(), call.keys().to_vec(), call.args().to_vec()));
+            if let Some(error) = &self.script_error {
+                return Err(FakeError(error.clone()));
+            }
+            Ok(self
+                .script_bytes_results
+                .pop()
+                .flatten()
+                .map(|data| vec![data])
+                .unwrap_or_default())
         }
 
         fn eval_script_status(&mut self, call: &RedisScriptCall) -> Result<String, Self::Error> {
@@ -528,6 +571,27 @@ mod tests {
                 return Err(FakeError(error.clone()));
             }
             Ok(self.script_bytes_results.borrow_mut().pop().unwrap_or(None))
+        }
+
+        fn eval_script_byte_vec(
+            &mut self,
+            call: &RedisScriptCall,
+        ) -> Result<Vec<Vec<u8>>, Self::Error> {
+            self.calls.borrow_mut().push(ProviderCall::EvalScriptInt {
+                script: call.script(),
+                keys: call.keys().to_vec(),
+                args: call.args().to_vec(),
+            });
+            if let Some(error) = &self.command_error {
+                return Err(FakeError(error.clone()));
+            }
+            Ok(self
+                .script_bytes_results
+                .borrow_mut()
+                .pop()
+                .flatten()
+                .map(|data| vec![data])
+                .unwrap_or_default())
         }
 
         fn eval_script_status(&mut self, call: &RedisScriptCall) -> Result<String, Self::Error> {
