@@ -2,6 +2,16 @@
 
 ## 2026-05-14
 
+- Added the worker-side archive path: `ArchiveBroker`, `ArchiveError`,
+  `RedisArchivePlan`, `RedisBroker::archive`, and the archive Lua script for
+  active-to-archived failure lifecycle movement.
+- Covered archive behavior with unit and Redis integration tests for active to
+  archived movement, failure-message mutation, and failed statistics updates.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go
+- TODO: Add lease-expiration recovery and scheduled/retry forwarding next so
+  failed tasks can be automatically reprocessed or recovered after worker
+  crashes.
+
 - Added the worker-side retry path: `RetryBroker`, `RetryError`,
   `RedisRetryPlan`, `RedisBroker::retry`, and the fixed Asynq v0.26.0
   `retry` Lua script.

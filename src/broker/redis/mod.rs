@@ -9,9 +9,9 @@ pub use executor::{
     RedisConnectionProviderExecutor,
 };
 pub use plan::{
-    DEFAULT_LEASE_DURATION, RedisArg, RedisCompletePlan, RedisCompletePlanError, RedisDequeueCall,
-    RedisDequeuePlan, RedisDequeuePlanError, RedisEnqueueOperation, RedisEnqueuePlan,
-    RedisEnqueuePlanError, RedisRetryPlan, RedisRetryPlanError, RedisScript, RedisScriptCall,
-    STATS_TTL,
+    DEFAULT_LEASE_DURATION, RedisArchivePlan, RedisArchivePlanError, RedisArg, RedisCompletePlan,
+    RedisCompletePlanError, RedisDequeueCall, RedisDequeuePlan, RedisDequeuePlanError,
+    RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError, RedisRetryPlan,
+    RedisRetryPlanError, RedisScript, RedisScriptCall, STATS_TTL,
 };
 pub use scripts::{RedisScriptCallError, RedisScriptResult, RedisScriptSpec};

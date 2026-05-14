@@ -35,7 +35,7 @@ pub enum RedisScriptCallError {
 }
 
 impl RedisScript {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Enqueue,
         Self::EnqueueUnique,
         Self::Schedule,
@@ -48,6 +48,7 @@ impl RedisScript {
         Self::MarkAsComplete,
         Self::MarkAsCompleteUnique,
         Self::Retry,
+        Self::Archive,
     ];
 
     pub const fn spec(self) -> RedisScriptSpec {
@@ -133,6 +134,13 @@ impl RedisScript {
                 script: self,
                 name: "retry",
                 source: RETRY_SOURCE,
+                key_count: 8,
+                arg_count: 6,
+            },
+            Self::Archive => RedisScriptSpec {
+                script: self,
+                name: "archive",
+                source: ARCHIVE_SOURCE,
                 key_count: 8,
                 arg_count: 6,
             },
@@ -514,14 +522,51 @@ end
 return redis.status_reply("OK")
 "#;
 
+// Source: Asynq v0.26.0 archive task lifecycle script.
+const ARCHIVE_SOURCE: &str = r#"
+if redis.call("LREM", KEYS[1], 0, ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZREM", KEYS[2], ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+redis.call("ZADD", KEYS[3], ARGV[3], ARGV[1])
+redis.call("HSET", KEYS[4],
+           "msg", ARGV[2],
+           "state", "archived")
+if tonumber(ARGV[5]) == 1 then
+  local processed = redis.call("INCR", KEYS[5])
+  if tonumber(processed) == 1 then
+    redis.call("EXPIREAT", KEYS[5], ARGV[4])
+  end
+  local processed_total = redis.call("GET", KEYS[6])
+  if tonumber(processed_total) == tonumber(ARGV[6]) then
+    redis.call("SET", KEYS[6], 1)
+  else
+    redis.call("INCR", KEYS[6])
+  end
+  local failed = redis.call("INCR", KEYS[7])
+  if tonumber(failed) == 1 then
+    redis.call("EXPIREAT", KEYS[7], ARGV[4])
+  end
+  local failed_total = redis.call("GET", KEYS[8])
+  if tonumber(failed_total) == tonumber(ARGV[6]) then
+    redis.call("SET", KEYS[8], 1)
+  else
+    redis.call("INCR", KEYS[8])
+  end
+end
+return redis.status_reply("OK")
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, UNIX_EPOCH};
 
     use crate::{
-        EnqueuePlan, RedisCompletePlan, RedisEnqueueOperation, RedisEnqueuePlan, RedisRetryPlan,
-        Task, TaskMessage, TaskOption,
+        EnqueuePlan, RedisArchivePlan, RedisCompletePlan, RedisEnqueueOperation, RedisEnqueuePlan,
+        RedisRetryPlan, Task, TaskMessage, TaskOption,
     };
 
     #[test]
@@ -544,6 +589,7 @@ mod tests {
                 5,
             ),
             (RedisScript::Retry, "retry", 8, 6),
+            (RedisScript::Archive, "archive", 8, 6),
         ];
 
         for (script, name, key_count, arg_count) in expected {
@@ -562,7 +608,8 @@ mod tests {
                 | RedisScript::DoneUnique
                 | RedisScript::MarkAsComplete
                 | RedisScript::MarkAsCompleteUnique
-                | RedisScript::Retry => {
+                | RedisScript::Retry
+                | RedisScript::Archive => {
                     assert!(spec.source().contains("status_reply"));
                     assert!(spec.source().contains("NOT FOUND"));
                 }
@@ -590,6 +637,7 @@ mod tests {
         );
         assert_eq!(RedisScript::Done.result_for_code(1), None);
         assert_eq!(RedisScript::Retry.result_for_code(1), None);
+        assert_eq!(RedisScript::Archive.result_for_code(1), None);
     }
 
     #[test]
@@ -738,6 +786,18 @@ mod tests {
 
         let redis_plan =
             RedisRetryPlan::from_message(&message, now, retry_at, "handler failed", true).unwrap();
+
+        redis_plan.call().validate().unwrap();
+    }
+
+    #[test]
+    fn redis_archive_plan_matches_script_shape() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let message = active_message(0, "");
+
+        let redis_plan =
+            RedisArchivePlan::from_message(&message, now, now, "max retry exhausted", true)
+                .unwrap();
 
         redis_plan.call().validate().unwrap();
     }

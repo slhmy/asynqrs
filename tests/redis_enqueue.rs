@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use asynq_rs::{
-    BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, RedisBroker,
+    ArchiveBroker, BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, RedisBroker,
     RedisConnectionExecutor, RedisScript, RedisScriptResult, RetryBroker, Task, TaskMessage,
     TaskOption, TaskState,
 };
@@ -315,6 +315,72 @@ fn retry_moves_active_task_to_retry_set_and_records_failure_stats() {
 }
 
 #[test]
+fn archive_moves_active_task_to_archived_set_and_records_failure_stats() {
+    let Some(mut fixture) = RedisFixture::new("archive") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+            TaskOption::max_retry(0),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let dequeued = client
+        .broker_mut()
+        .dequeue(&[fixture.queue().to_owned()])
+        .unwrap();
+    client
+        .broker_mut()
+        .archive(
+            dequeued.message(),
+            std::time::SystemTime::now(),
+            "max retry exhausted",
+            true,
+        )
+        .unwrap();
+
+    let active_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.active_key(), 0, -1)
+        .unwrap();
+    assert!(active_ids.is_empty());
+    let lease_score: Option<f64> = fixture
+        .connection
+        .zscore(fixture.lease_key(), "task-id")
+        .unwrap();
+    assert!(lease_score.is_none());
+    let archived_score: f64 = fixture
+        .connection
+        .zscore(fixture.archived_key(), "task-id")
+        .unwrap();
+    assert!(archived_score > 0.0);
+
+    let stored: HashMap<String, Vec<u8>> = fixture
+        .connection
+        .hgetall(fixture.task_key("task-id"))
+        .unwrap();
+    assert_eq!(string_field(&stored, "state"), "archived");
+    let archived_msg = decode_msg(stored.get("msg").unwrap());
+    assert_eq!(archived_msg.retried, 1);
+    assert_eq!(archived_msg.error_msg, "max retry exhausted");
+    assert!(archived_msg.last_failed_at > 0);
+
+    let processed_total: i64 = fixture
+        .connection
+        .get(fixture.processed_total_key())
+        .unwrap();
+    let failed_total: i64 = fixture.connection.get(fixture.failed_total_key()).unwrap();
+    assert_eq!(processed_total, 1);
+    assert_eq!(failed_total, 1);
+}
+
+#[test]
 fn unique_enqueue_sets_unique_key_and_rejects_duplicate() {
     let Some(mut fixture) = RedisFixture::new("unique") else {
         return;
@@ -457,6 +523,10 @@ impl RedisFixture {
 
     fn completed_key(&self) -> String {
         format!("asynq:{{{}}}:completed", self.queue)
+    }
+
+    fn archived_key(&self) -> String {
+        format!("asynq:{{{}}}:archived", self.queue)
     }
 
     fn retry_key(&self) -> String {

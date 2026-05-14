@@ -1,3 +1,4 @@
+mod archive;
 mod broker;
 mod client;
 mod complete;
@@ -11,13 +12,15 @@ mod retry;
 mod state;
 mod task;
 
+pub use archive::{ArchiveBroker, ArchiveError};
 pub use broker::redis::{
-    DEFAULT_LEASE_DURATION, RedisArg, RedisBroker, RedisBrokerError, RedisClientExecutor,
-    RedisCommandExecutor, RedisCompletePlan, RedisCompletePlanError, RedisConnectionExecutor,
-    RedisConnectionProvider, RedisConnectionProviderExecutor, RedisDequeueCall, RedisDequeuePlan,
-    RedisDequeuePlanError, RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError,
-    RedisExecutor, RedisExecutorError, RedisRetryPlan, RedisRetryPlanError, RedisScript,
-    RedisScriptCall, RedisScriptCallError, RedisScriptResult, RedisScriptSpec, STATS_TTL,
+    DEFAULT_LEASE_DURATION, RedisArchivePlan, RedisArchivePlanError, RedisArg, RedisBroker,
+    RedisBrokerError, RedisClientExecutor, RedisCommandExecutor, RedisCompletePlan,
+    RedisCompletePlanError, RedisConnectionExecutor, RedisConnectionProvider,
+    RedisConnectionProviderExecutor, RedisDequeueCall, RedisDequeuePlan, RedisDequeuePlanError,
+    RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError, RedisExecutor,
+    RedisExecutorError, RedisRetryPlan, RedisRetryPlanError, RedisScript, RedisScriptCall,
+    RedisScriptCallError, RedisScriptResult, RedisScriptSpec, STATS_TTL,
 };
 pub use client::{
     Broker, BrokerError, Client, ClientError, Clock, EnqueueResult, SystemClock, TaskIdGenerator,
