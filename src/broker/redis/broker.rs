@@ -2,12 +2,12 @@ use std::time::SystemTime;
 
 use crate::{
     ArchiveBroker, ArchiveError, Broker, BrokerError, Clock, CompleteBroker, CompleteError,
-    DecodeTaskMessageError, DequeueBroker, DequeueError, DequeuedTask, EnqueuePlan,
-    RedisArchivePlan, RedisArchivePlanError, RedisCompletePlan, RedisCompletePlanError,
-    RedisDequeueCall, RedisDequeuePlan, RedisDequeuePlanError, RedisEnqueueOperation,
-    RedisEnqueuePlan, RedisEnqueuePlanError, RedisRetryPlan, RedisRetryPlanError, RedisScript,
-    RedisScriptCall, RedisScriptCallError, RedisScriptResult, RetryBroker, RetryError, SystemClock,
-    TaskMessage,
+    DecodeTaskMessageError, DequeueBroker, DequeueError, DequeuedTask, EnqueuePlan, ForwardBroker,
+    ForwardError, RedisArchivePlan, RedisArchivePlanError, RedisCompletePlan,
+    RedisCompletePlanError, RedisDequeueCall, RedisDequeuePlan, RedisDequeuePlanError,
+    RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError, RedisForwardPlan,
+    RedisForwardPlanError, RedisRetryPlan, RedisRetryPlanError, RedisScript, RedisScriptCall,
+    RedisScriptCallError, RedisScriptResult, RetryBroker, RetryError, SystemClock, TaskMessage,
 };
 
 /// Minimal executor surface needed by `RedisBroker`.
@@ -46,6 +46,7 @@ pub enum RedisBrokerError {
     CompletePlan(RedisCompletePlanError),
     RetryPlan(RedisRetryPlanError),
     ArchivePlan(RedisArchivePlanError),
+    ForwardPlan(RedisForwardPlanError),
     ScriptCall(RedisScriptCallError),
     Executor(RedisExecutorError),
     Decode(DecodeTaskMessageError),
@@ -148,6 +149,20 @@ where
             error_message,
             is_failure,
         )
+    }
+}
+
+impl<E, C> ForwardBroker for RedisBroker<E, C>
+where
+    E: RedisExecutor,
+    C: Clock,
+{
+    fn forward_scheduled(&mut self, queue: &str) -> Result<usize, ForwardError> {
+        self.forward_with_now(queue, self.clock.now(), true)
+    }
+
+    fn forward_retry(&mut self, queue: &str) -> Result<usize, ForwardError> {
+        self.forward_with_now(queue, self.clock.now(), false)
     }
 }
 
@@ -316,6 +331,37 @@ where
             ))
         }
     }
+
+    pub fn forward_with_now(
+        &mut self,
+        queue: &str,
+        now: SystemTime,
+        scheduled: bool,
+    ) -> Result<usize, ForwardError> {
+        let redis_plan = if scheduled {
+            RedisForwardPlan::from_scheduled_queue(queue, now)
+        } else {
+            RedisForwardPlan::from_retry_queue(queue, now)
+        }
+        .map_err(RedisBrokerError::ForwardPlan)
+        .map_err(ForwardError::from)?;
+        let call = redis_plan.call();
+        call.validate()
+            .map_err(RedisBrokerError::ScriptCall)
+            .map_err(ForwardError::from)?;
+        let result = self
+            .executor
+            .eval_script_int(call)
+            .map_err(RedisBrokerError::Executor)
+            .map_err(ForwardError::from)?;
+        if result < 0 {
+            return Err(ForwardError::Other(format!(
+                "unexpected {:?} script result: {result}",
+                call.script()
+            )));
+        }
+        Ok(result as usize)
+    }
 }
 
 fn map_script_result(call: &RedisScriptCall, result: i64) -> Result<(), BrokerError> {
@@ -360,6 +406,7 @@ impl std::fmt::Display for RedisBrokerError {
             Self::CompletePlan(error) => write!(f, "failed to build Redis complete plan: {error}"),
             Self::RetryPlan(error) => write!(f, "failed to build Redis retry plan: {error}"),
             Self::ArchivePlan(error) => write!(f, "failed to build Redis archive plan: {error}"),
+            Self::ForwardPlan(error) => write!(f, "failed to build Redis forward plan: {error}"),
             Self::ScriptCall(error) => write!(f, "invalid Redis script call: {error}"),
             Self::Executor(error) => write!(f, "Redis executor failed: {error}"),
             Self::Decode(error) => write!(f, "failed to decode dequeued task message: {error}"),
@@ -381,6 +428,7 @@ impl std::error::Error for RedisBrokerError {
             Self::CompletePlan(error) => Some(error),
             Self::RetryPlan(error) => Some(error),
             Self::ArchivePlan(error) => Some(error),
+            Self::ForwardPlan(error) => Some(error),
             Self::ScriptCall(error) => Some(error),
             Self::Executor(error) => Some(error),
             Self::Decode(error) => Some(error),
@@ -419,6 +467,12 @@ impl From<RedisArchivePlanError> for RedisBrokerError {
     }
 }
 
+impl From<RedisForwardPlanError> for RedisBrokerError {
+    fn from(error: RedisForwardPlanError) -> Self {
+        Self::ForwardPlan(error)
+    }
+}
+
 impl From<RedisExecutorError> for RedisBrokerError {
     fn from(error: RedisExecutorError) -> Self {
         Self::Executor(error)
@@ -445,6 +499,7 @@ impl From<RedisBrokerError> for BrokerError {
             RedisBrokerError::CompletePlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::RetryPlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::ArchivePlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::ForwardPlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::ScriptCall(error) => Self::Other(error.to_string()),
             RedisBrokerError::Executor(error) => Self::Other(error.to_string()),
             RedisBrokerError::Decode(error) => Self::Other(error.to_string()),
@@ -465,6 +520,7 @@ impl From<RedisBrokerError> for DequeueError {
             RedisBrokerError::CompletePlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::RetryPlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::ArchivePlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::ForwardPlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::ScriptCall(error) => Self::Other(error.to_string()),
             RedisBrokerError::Executor(error) => Self::Other(error.to_string()),
             RedisBrokerError::Decode(error) => Self::Other(error.to_string()),
@@ -488,6 +544,7 @@ impl From<RedisBrokerError> for CompleteError {
             RedisBrokerError::CompletePlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::RetryPlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::ArchivePlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::ForwardPlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::ScriptCall(error) => Self::Other(error.to_string()),
             RedisBrokerError::Executor(error) => Self::Other(error.to_string()),
             RedisBrokerError::Plan(error) => Self::Other(error.to_string()),
@@ -511,6 +568,7 @@ impl From<RedisBrokerError> for RetryError {
             }
             RedisBrokerError::RetryPlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::ArchivePlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::ForwardPlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::ScriptCall(error) => Self::Other(error.to_string()),
             RedisBrokerError::Executor(error) => Self::Other(error.to_string()),
             RedisBrokerError::Plan(error) => Self::Other(error.to_string()),
@@ -540,6 +598,29 @@ impl From<RedisBrokerError> for ArchiveError {
             RedisBrokerError::DequeuePlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::CompletePlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::RetryPlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::ForwardPlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::Decode(error) => Self::Other(error.to_string()),
+            RedisBrokerError::UnexpectedScriptResult { script, result } => {
+                Self::Other(format!("unexpected {script:?} script result: {result}"))
+            }
+            RedisBrokerError::UnexpectedScriptStatus { script, status } => {
+                Self::Other(format!("unexpected {script:?} script status: {status}"))
+            }
+        }
+    }
+}
+
+impl From<RedisBrokerError> for ForwardError {
+    fn from(error: RedisBrokerError) -> Self {
+        match error {
+            RedisBrokerError::ForwardPlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::ScriptCall(error) => Self::Other(error.to_string()),
+            RedisBrokerError::Executor(error) => Self::Other(error.to_string()),
+            RedisBrokerError::Plan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::DequeuePlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::CompletePlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::RetryPlan(error) => Self::Other(error.to_string()),
+            RedisBrokerError::ArchivePlan(error) => Self::Other(error.to_string()),
             RedisBrokerError::Decode(error) => Self::Other(error.to_string()),
             RedisBrokerError::UnexpectedScriptResult { script, result } => {
                 Self::Other(format!("unexpected {script:?} script result: {result}"))
@@ -1041,6 +1122,62 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, ArchiveError::NotFound);
+    }
+
+    #[test]
+    fn forwards_scheduled_tasks_with_forward_script() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let executor = FakeExecutor {
+            script_int_results: vec![2],
+            ..FakeExecutor::default()
+        };
+        let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+
+        let moved = broker.forward_scheduled("critical").unwrap();
+
+        assert_eq!(moved, 2);
+        let calls = &broker.executor().calls;
+        assert_eq!(calls.len(), 1);
+        let ExecutorCall::EvalScriptInt { script, keys, args } = &calls[0] else {
+            panic!("expected forward script call");
+        };
+        assert_eq!(*script, RedisScript::Forward);
+        assert_eq!(
+            keys,
+            &[
+                "asynq:{critical}:scheduled".to_owned(),
+                "asynq:{critical}:pending".to_owned(),
+                "asynq:{critical}:t:".to_owned(),
+            ]
+        );
+        assert_eq!(args[0], RedisArg::I64(1_700_000_000));
+        assert_eq!(args[1], RedisArg::I64(1_700_000_000_000_000_000));
+    }
+
+    #[test]
+    fn forwards_retry_tasks_with_forward_script() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let executor = FakeExecutor {
+            script_int_results: vec![1],
+            ..FakeExecutor::default()
+        };
+        let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+
+        let moved = broker.forward_retry("critical").unwrap();
+
+        assert_eq!(moved, 1);
+        let ExecutorCall::EvalScriptInt { script, keys, .. } = &broker.executor().calls[0] else {
+            panic!("expected forward script call");
+        };
+        assert_eq!(*script, RedisScript::Forward);
+        assert_eq!(
+            keys,
+            &[
+                "asynq:{critical}:retry".to_owned(),
+                "asynq:{critical}:pending".to_owned(),
+                "asynq:{critical}:t:".to_owned(),
+            ]
+        );
     }
 
     #[derive(Debug, Clone, Copy)]

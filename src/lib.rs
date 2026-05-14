@@ -4,6 +4,7 @@ mod client;
 mod complete;
 mod dequeue;
 mod enqueue;
+mod forward;
 pub mod keys;
 mod message;
 mod options;
@@ -19,8 +20,9 @@ pub use broker::redis::{
     RedisCompletePlanError, RedisConnectionExecutor, RedisConnectionProvider,
     RedisConnectionProviderExecutor, RedisDequeueCall, RedisDequeuePlan, RedisDequeuePlanError,
     RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError, RedisExecutor,
-    RedisExecutorError, RedisRetryPlan, RedisRetryPlanError, RedisScript, RedisScriptCall,
-    RedisScriptCallError, RedisScriptResult, RedisScriptSpec, STATS_TTL,
+    RedisExecutorError, RedisForwardPlan, RedisForwardPlanError, RedisRetryPlan,
+    RedisRetryPlanError, RedisScript, RedisScriptCall, RedisScriptCallError, RedisScriptResult,
+    RedisScriptSpec, STATS_TTL,
 };
 pub use client::{
     Broker, BrokerError, Client, ClientError, Clock, EnqueueResult, SystemClock, TaskIdGenerator,
@@ -29,6 +31,7 @@ pub use client::{
 pub use complete::{CompleteBroker, CompleteError};
 pub use dequeue::{DequeueBroker, DequeueError, DequeuedTask};
 pub use enqueue::{DEFAULT_MAX_RETRY, DEFAULT_TIMEOUT, EnqueuePlan, EnqueuePlanError};
+pub use forward::{ForwardBroker, ForwardError};
 pub use message::{DecodeTaskMessageError, TaskMessage};
 pub use options::TaskOption;
 pub use retry::{RetryBroker, RetryError};

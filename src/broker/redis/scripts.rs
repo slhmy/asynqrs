@@ -35,7 +35,7 @@ pub enum RedisScriptCallError {
 }
 
 impl RedisScript {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Enqueue,
         Self::EnqueueUnique,
         Self::Schedule,
@@ -49,6 +49,7 @@ impl RedisScript {
         Self::MarkAsCompleteUnique,
         Self::Retry,
         Self::Archive,
+        Self::Forward,
     ];
 
     pub const fn spec(self) -> RedisScriptSpec {
@@ -143,6 +144,13 @@ impl RedisScript {
                 source: ARCHIVE_SOURCE,
                 key_count: 8,
                 arg_count: 6,
+            },
+            Self::Forward => RedisScriptSpec {
+                script: self,
+                name: "forward",
+                source: FORWARD_SOURCE,
+                key_count: 3,
+                arg_count: 2,
             },
         }
     }
@@ -559,6 +567,27 @@ end
 return redis.status_reply("OK")
 "#;
 
+// Source: Asynq v0.26.0 `forwardCmd`.
+const FORWARD_SOURCE: &str = r#"
+local ids = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", ARGV[1], "LIMIT", 0, 100)
+for _, id in ipairs(ids) do
+  local taskKey = KEYS[3] .. id
+  local group = redis.call("HGET", taskKey, "group")
+  if group then
+    redis.call("HSET", taskKey, "state", "aggregating")
+    redis.call("ZADD", KEYS[2] .. ":g:" .. group, ARGV[1], id)
+    redis.call("SADD", KEYS[2] .. ":groups", group)
+  else
+    redis.call("HSET", taskKey, "state", "pending", "pending_since", ARGV[2])
+    redis.call("LPUSH", KEYS[2], id)
+  end
+end
+if next(ids) ~= nil then
+  redis.call("ZREM", KEYS[1], unpack(ids))
+end
+return table.getn(ids)
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,7 +595,7 @@ mod tests {
 
     use crate::{
         EnqueuePlan, RedisArchivePlan, RedisCompletePlan, RedisEnqueueOperation, RedisEnqueuePlan,
-        RedisRetryPlan, Task, TaskMessage, TaskOption,
+        RedisForwardPlan, RedisRetryPlan, Task, TaskMessage, TaskOption,
     };
 
     #[test]
@@ -590,6 +619,7 @@ mod tests {
             ),
             (RedisScript::Retry, "retry", 8, 6),
             (RedisScript::Archive, "archive", 8, 6),
+            (RedisScript::Forward, "forward", 3, 2),
         ];
 
         for (script, name, key_count, arg_count) in expected {
@@ -603,6 +633,10 @@ mod tests {
                 RedisScript::Dequeue => {
                     assert!(spec.source().contains("return nil"));
                     assert!(spec.source().contains("HGET"));
+                }
+                RedisScript::Forward => {
+                    assert!(spec.source().contains("ZRANGEBYSCORE"));
+                    assert!(spec.source().contains("table.getn"));
                 }
                 RedisScript::Done
                 | RedisScript::DoneUnique
@@ -638,6 +672,7 @@ mod tests {
         assert_eq!(RedisScript::Done.result_for_code(1), None);
         assert_eq!(RedisScript::Retry.result_for_code(1), None);
         assert_eq!(RedisScript::Archive.result_for_code(1), None);
+        assert_eq!(RedisScript::Forward.result_for_code(1), None);
     }
 
     #[test]
@@ -800,6 +835,22 @@ mod tests {
                 .unwrap();
 
         redis_plan.call().validate().unwrap();
+    }
+
+    #[test]
+    fn redis_forward_plans_match_script_shapes() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        RedisForwardPlan::from_scheduled_queue("critical", now)
+            .unwrap()
+            .call()
+            .validate()
+            .unwrap();
+        RedisForwardPlan::from_retry_queue("critical", now)
+            .unwrap()
+            .call()
+            .validate()
+            .unwrap();
     }
 
     fn active_message(retention: i64, unique_key: &str) -> TaskMessage {

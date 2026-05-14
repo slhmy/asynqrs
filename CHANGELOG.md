@@ -2,6 +2,17 @@
 
 ## 2026-05-14
 
+- Added scheduled/retry forwarding: `ForwardBroker`, `ForwardError`,
+  `RedisForwardPlan`, `RedisBroker::forward_scheduled`,
+  `RedisBroker::forward_retry`, and the fixed Asynq v0.26.0 `forward` Lua
+  script.
+- Covered forward behavior with unit and Redis integration tests for due
+  scheduled/retry tasks moving back to pending, while not-yet-due tasks stay in
+  their source sorted sets.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L861-L900
+- TODO: Add the server-side forwarder loop and lease-expiration recovery so
+  scheduled/retry movement and crashed-worker recovery run automatically.
+
 - Added the worker-side archive path: `ArchiveBroker`, `ArchiveError`,
   `RedisArchivePlan`, `RedisBroker::archive`, and the archive Lua script for
   active-to-archived failure lifecycle movement.

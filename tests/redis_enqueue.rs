@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use asynq_rs::{
-    ArchiveBroker, BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, RedisBroker,
-    RedisConnectionExecutor, RedisScript, RedisScriptResult, RetryBroker, Task, TaskMessage,
-    TaskOption, TaskState,
+    ArchiveBroker, BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, ForwardBroker,
+    RedisBroker, RedisConnectionExecutor, RedisScript, RedisScriptResult, RetryBroker, Task,
+    TaskMessage, TaskOption, TaskState,
 };
 use redis::Commands;
 use testcontainers_modules::{
@@ -312,6 +312,119 @@ fn retry_moves_active_task_to_retry_set_and_records_failure_stats() {
         .unwrap();
     assert_eq!(processed_daily_keys.len(), 1);
     assert_eq!(failed_daily_keys.len(), 1);
+}
+
+#[test]
+fn forward_scheduled_moves_due_task_to_pending() {
+    let Some(mut fixture) = RedisFixture::new("forward-scheduled") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+            TaskOption::process_in(Duration::from_secs(3600)),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let not_due = client
+        .broker_mut()
+        .forward_scheduled(fixture.queue())
+        .unwrap();
+    assert_eq!(not_due, 0);
+    let pending_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.pending_key(), 0, -1)
+        .unwrap();
+    assert!(pending_ids.is_empty());
+
+    let _: usize = fixture
+        .connection
+        .zadd(fixture.scheduled_key(), "task-id", 0)
+        .unwrap();
+    let moved = client
+        .broker_mut()
+        .forward_scheduled(fixture.queue())
+        .unwrap();
+
+    assert_eq!(moved, 1);
+    let pending_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.pending_key(), 0, -1)
+        .unwrap();
+    assert_eq!(pending_ids, ["task-id"]);
+    let scheduled_score: Option<f64> = fixture
+        .connection
+        .zscore(fixture.scheduled_key(), "task-id")
+        .unwrap();
+    assert!(scheduled_score.is_none());
+    let stored: HashMap<String, Vec<u8>> = fixture
+        .connection
+        .hgetall(fixture.task_key("task-id"))
+        .unwrap();
+    assert_eq!(string_field(&stored, "state"), "pending");
+    assert!(stored.contains_key("pending_since"));
+}
+
+#[test]
+fn forward_retry_moves_due_task_to_pending() {
+    let Some(mut fixture) = RedisFixture::new("forward-retry") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let dequeued = client
+        .broker_mut()
+        .dequeue(&[fixture.queue().to_owned()])
+        .unwrap();
+    client
+        .broker_mut()
+        .retry(
+            dequeued.message(),
+            std::time::SystemTime::now() + Duration::from_secs(3600),
+            "handler failed",
+            true,
+        )
+        .unwrap();
+    let not_due = client.broker_mut().forward_retry(fixture.queue()).unwrap();
+    assert_eq!(not_due, 0);
+
+    let _: usize = fixture
+        .connection
+        .zadd(fixture.retry_key(), "task-id", 0)
+        .unwrap();
+    let moved = client.broker_mut().forward_retry(fixture.queue()).unwrap();
+
+    assert_eq!(moved, 1);
+    let pending_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.pending_key(), 0, -1)
+        .unwrap();
+    assert_eq!(pending_ids, ["task-id"]);
+    let retry_score: Option<f64> = fixture
+        .connection
+        .zscore(fixture.retry_key(), "task-id")
+        .unwrap();
+    assert!(retry_score.is_none());
+    let stored: HashMap<String, Vec<u8>> = fixture
+        .connection
+        .hgetall(fixture.task_key("task-id"))
+        .unwrap();
+    assert_eq!(string_field(&stored, "state"), "pending");
+    assert!(stored.contains_key("pending_since"));
 }
 
 #[test]

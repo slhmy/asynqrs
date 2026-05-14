@@ -64,6 +64,16 @@ pub struct RedisArchivePlan {
     call: RedisScriptCall,
 }
 
+/// Redis command intent for moving due scheduled/retry tasks to processable
+/// queues.
+///
+/// Reference: Asynq v0.26.0 `RDB.ForwardIfReady` and `forwardCmd`:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L861-L900>.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedisForwardPlan {
+    call: RedisScriptCall,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedisEnqueueOperation {
     PublishQueue { key: String, queue: String },
@@ -103,6 +113,7 @@ pub enum RedisScript {
     MarkAsCompleteUnique,
     Retry,
     Archive,
+    Forward,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +158,12 @@ pub enum RedisRetryPlanError {
 pub enum RedisArchivePlanError {
     EmptyQueueName,
     EmptyTaskId,
+    TimeOverflow(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedisForwardPlanError {
+    EmptyQueueName,
     TimeOverflow(&'static str),
 }
 
@@ -288,6 +305,23 @@ impl RedisArchivePlan {
         Ok(Self {
             call: archive_call(message, now, archived_at, error_message, is_failure)?,
         })
+    }
+
+    pub fn call(&self) -> &RedisScriptCall {
+        &self.call
+    }
+}
+
+impl RedisForwardPlan {
+    pub fn from_scheduled_queue(
+        queue: &str,
+        now: SystemTime,
+    ) -> Result<Self, RedisForwardPlanError> {
+        forward_plan(queue, keys::scheduled_key(queue), now)
+    }
+
+    pub fn from_retry_queue(queue: &str, now: SystemTime) -> Result<Self, RedisForwardPlanError> {
+        forward_plan(queue, keys::retry_key(queue), now)
     }
 
     pub fn call(&self) -> &RedisScriptCall {
@@ -643,6 +677,31 @@ fn archive_call(
     ))
 }
 
+fn forward_plan(
+    queue: &str,
+    source_key: String,
+    now: SystemTime,
+) -> Result<RedisForwardPlan, RedisForwardPlanError> {
+    if queue.trim().is_empty() {
+        return Err(RedisForwardPlanError::EmptyQueueName);
+    }
+
+    Ok(RedisForwardPlan {
+        call: RedisScriptCall::new(
+            RedisScript::Forward,
+            vec![
+                source_key,
+                keys::pending_key(queue),
+                keys::task_key_prefix(queue),
+            ],
+            vec![
+                RedisArg::I64(unix_seconds_forward(now, "forward time")?),
+                RedisArg::I64(unix_nanoseconds_forward(now)?),
+            ],
+        ),
+    })
+}
+
 fn stats_expire_at(now: SystemTime) -> Result<i64, RedisCompletePlanError> {
     let time = now
         .checked_add(STATS_TTL)
@@ -723,6 +782,29 @@ fn unix_seconds_archive(
         .map_err(|_| RedisArchivePlanError::TimeOverflow(context))
 }
 
+fn unix_seconds_forward(
+    time: SystemTime,
+    context: &'static str,
+) -> Result<i64, RedisForwardPlanError> {
+    let seconds = match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i128::from(duration_seconds(duration)),
+        Err(error) => -i128::from(duration_seconds(error.duration())),
+    };
+    seconds
+        .try_into()
+        .map_err(|_| RedisForwardPlanError::TimeOverflow(context))
+}
+
+fn unix_nanoseconds_forward(time: SystemTime) -> Result<i64, RedisForwardPlanError> {
+    let nanos = match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration_nanoseconds(duration),
+        Err(error) => -duration_nanoseconds(error.duration()),
+    };
+    nanos
+        .try_into()
+        .map_err(|_| RedisForwardPlanError::TimeOverflow("unix nanoseconds"))
+}
+
 fn duration_nanoseconds(duration: Duration) -> i128 {
     i128::from(duration.as_secs()) * 1_000_000_000 + i128::from(duration.subsec_nanos())
 }
@@ -793,6 +875,17 @@ impl std::fmt::Display for RedisArchivePlanError {
 }
 
 impl std::error::Error for RedisArchivePlanError {}
+
+impl std::fmt::Display for RedisForwardPlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
+            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
+        }
+    }
+}
+
+impl std::error::Error for RedisForwardPlanError {}
 
 #[cfg(test)]
 mod tests {
@@ -1239,6 +1332,51 @@ mod tests {
             RedisArchivePlan::from_message(&msg, now, now, "max retry exhausted", true)
                 .unwrap_err(),
             RedisArchivePlanError::EmptyTaskId
+        );
+    }
+
+    #[test]
+    fn plans_forward_scheduled_script_for_queue() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let plan = RedisForwardPlan::from_scheduled_queue("critical", now).unwrap();
+        let call = plan.call();
+
+        assert_eq!(call.script(), RedisScript::Forward);
+        assert_eq!(
+            call.keys(),
+            &[
+                "asynq:{critical}:scheduled".to_owned(),
+                "asynq:{critical}:pending".to_owned(),
+                "asynq:{critical}:t:".to_owned(),
+            ]
+        );
+        assert_eq!(call.args()[0], RedisArg::I64(1_700_000_000));
+        assert_eq!(call.args()[1], RedisArg::I64(1_700_000_000_000_000_000));
+    }
+
+    #[test]
+    fn plans_forward_retry_script_for_queue() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let plan = RedisForwardPlan::from_retry_queue("critical", now).unwrap();
+        let call = plan.call();
+
+        assert_eq!(call.script(), RedisScript::Forward);
+        assert_eq!(call.keys()[0], "asynq:{critical}:retry");
+    }
+
+    #[test]
+    fn validates_forward_inputs() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        assert_eq!(
+            RedisForwardPlan::from_scheduled_queue(" ", now).unwrap_err(),
+            RedisForwardPlanError::EmptyQueueName
+        );
+        assert_eq!(
+            RedisForwardPlan::from_retry_queue(" ", now).unwrap_err(),
+            RedisForwardPlanError::EmptyQueueName
         );
     }
 
