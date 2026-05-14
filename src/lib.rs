@@ -10,6 +10,7 @@ mod lease;
 mod message;
 mod options;
 pub mod pb;
+mod processor;
 mod recover;
 mod retry;
 mod state;
@@ -38,6 +39,9 @@ pub use forward::{ForwardBroker, ForwardError};
 pub use lease::{LeaseBroker, LeaseError, LeaseExtension};
 pub use message::{DecodeTaskMessageError, TaskMessage};
 pub use options::TaskOption;
+pub use processor::{
+    DefaultRetryDelay, Handler, HandlerError, Processor, ProcessorError, ProcessorRun, RetryDelay,
+};
 pub use recover::{RecoverBroker, RecoverError, RecoverResult};
 pub use retry::{RetryBroker, RetryError};
 pub use state::{ParseTaskStateError, TaskState};

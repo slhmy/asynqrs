@@ -1,10 +1,11 @@
 # Worker Dequeue, Complete, Retry, Archive, Forward, Recover, And Lease
 
-这份文档记录当前 worker 侧已经实现的最小生命周期路径：从 Redis pending
-queue 取出一个任务，移动到 active queue，写入 lease；处理成功后完成任务，
-处理失败后把任务移入 retry set，重试耗尽后归档到 archived set；到期的
-scheduled/retry 任务可以被 forward 回 pending；lease 过期的 active 任务
-可以按 retry/archive 规则恢复；正在执行的 active 任务可以续约 lease。
+这份文档记录当前 worker 侧已经实现的最小生命周期路径：`Processor`
+可以从 Redis pending queue 取出一个任务，移动到 active queue，写入
+lease，调用用户 handler；处理成功后完成任务，处理失败后把任务移入 retry
+set，重试耗尽后归档到 archived set；到期的 scheduled/retry 任务可以被
+forward 回 pending；lease 过期的 active 任务可以按 retry/archive 规则恢复；
+正在执行的 active 任务可以续约 lease。
 
 实现参考 Asynq v0.26.0：
 
@@ -29,6 +30,60 @@ scheduled/retry 任务可以被 forward 回 pending；lease 过期的 active 任
   <https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L54-L60>
 - broker 接口：
   <https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L371-L419>
+- `Handler` / `HandlerFunc`：
+  <https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L622-L650>
+- processor 成功/失败路由：
+  <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381>
+
+## Processor
+
+`Processor` 是当前最小 worker 执行器。它每次执行一个任务：
+
+1. 调用 `DequeueBroker::dequeue`。
+2. 把 `TaskMessage` 转成公开 `Task`，并调用 handler。
+3. handler 成功时调用 `CompleteBroker::complete`。
+4. handler 返回 `HandlerError::Failed` 时，如果仍有 retry 次数，调用
+   `RetryBroker::retry`；否则调用 `ArchiveBroker::archive`。
+5. handler 返回 `HandlerError::SkipRetry` 时直接 archive。
+6. handler 返回 `HandlerError::RevokeTask` 时按 Asynq 的 done 路径删除任务，
+   不 retry，也不 archive。
+
+```rust,no_run
+use std::time::Duration;
+
+use asynq_rs::{
+    HandlerError, Processor, RedisBroker, RedisClientExecutor, Task,
+};
+
+let redis_client = redis::Client::open("redis://127.0.0.1:6379").unwrap();
+let executor = RedisClientExecutor::new(redis_client);
+let broker = RedisBroker::new(executor);
+
+let mut processor = Processor::with_retry_delay(
+    broker,
+    |task: &Task| {
+        if task.type_name() == "email:welcome" {
+            Ok(())
+        } else {
+            Err(HandlerError::failed("unsupported task type"))
+        }
+    },
+    |_retried, _error, _task| Duration::from_secs(60),
+);
+
+let result = processor
+    .run_once(&["critical".to_owned(), "default".to_owned()])
+    .unwrap();
+
+println!("processor result: {result:?}");
+```
+
+默认 `DefaultRetryDelay` 按 Asynq v0.26.0 的指数退避公式计算下一次 retry
+时间：`retried^4 + 15 + random(0..30) * (retried + 1)` 秒。
+
+当前 `Processor` 仍是同步、单线程、一次处理一个任务。它还没有实现上游
+server 的并发 worker 池、context timeout/deadline、后台 lease extender、
+shutdown requeue、sync retry、`IsFailure` predicate 和 error handler hook。
 
 ## Dequeue
 

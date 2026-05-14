@@ -11,7 +11,7 @@ pub struct Task {
     payload: Vec<u8>,
     headers: HashMap<String, String>,
     opts: Vec<TaskOption>,
-    // TODO: Add a ResultWriter equivalent when worker-side task execution is modeled.
+    // TODO: Add a ResultWriter equivalent when worker-side result writing is modeled.
     // Upstream stores `w *ResultWriter` only for tasks passed to Handler.ProcessTask.
 }
 

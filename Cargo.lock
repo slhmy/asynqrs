@@ -87,6 +87,7 @@ version = "0.1.0"
 dependencies = [
  "md-5",
  "prost 0.13.5",
+ "rand 0.9.4",
  "redis",
  "testcontainers-modules",
  "uuid",

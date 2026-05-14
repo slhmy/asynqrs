@@ -2,6 +2,20 @@
 
 ## 2026-05-14
 
+- Added the first minimal worker processor: `Handler`, `HandlerError`,
+  `RetryDelay`, `DefaultRetryDelay`, `Processor`, `ProcessorRun`, and
+  `ProcessorError`.
+- `Processor::run_once` now wires dequeue to handler execution, then routes
+  success to complete, ordinary failure to retry/archive, `SkipRetry` to
+  archive, and `RevokeTask` to the done/delete path.
+- Covered processor behavior with unit tests and Redis integration tests for
+  successful completion, handler failure retry, and retained-task revoke.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L622-L650
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381
+- TODO: Add worker concurrency, task context timeout/deadline handling, lease
+  extension, requeue-on-shutdown, sync retry, an `IsFailure` predicate, and
+  error-handler hooks once the full `Server` / `Processor` runtime is modeled.
+
 - Added lease extension: `LeaseBroker`, `LeaseError`, `LeaseExtension`,
   `RedisExtendLeasePlan`, and `RedisBroker::extend_lease`.
 - Redis lease extension now mirrors Asynq v0.26.0 `RDB.ExtendLease` by using

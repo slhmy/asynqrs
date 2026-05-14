@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use asynq_rs::{
     ArchiveBroker, BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, ForwardBroker,
-    LeaseBroker, RecoverBroker, RedisBroker, RedisConnectionExecutor, RedisScript,
-    RedisScriptResult, RetryBroker, Task, TaskMessage, TaskOption, TaskState,
+    HandlerError, LeaseBroker, Processor, ProcessorRun, RecoverBroker, RedisBroker,
+    RedisConnectionExecutor, RedisScript, RedisScriptResult, RetryBroker, Task, TaskMessage,
+    TaskOption, TaskState,
 };
 use redis::Commands;
 use testcontainers_modules::{
@@ -654,6 +655,153 @@ fn extend_lease_updates_existing_active_lease_only() {
         .zscore(fixture.lease_key(), "task-id")
         .unwrap();
     assert!(lease_score.is_none());
+}
+
+#[test]
+fn processor_run_once_completes_successful_task() {
+    let Some(mut fixture) = RedisFixture::new("processor-complete") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::with_headers_and_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [("trace-id", "abc")],
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let broker = client.into_broker();
+    let mut processor = Processor::with_retry_delay(
+        broker,
+        |task: &Task| {
+            assert_eq!(task.type_name(), "email:welcome");
+            assert_eq!(task.payload(), b"payload");
+            assert_eq!(task.header("trace-id"), Some("abc"));
+            Ok(())
+        },
+        |_retried, _error: &HandlerError, _task: &Task| Duration::from_secs(60),
+    );
+
+    let result = processor.run_once(&[fixture.queue().to_owned()]).unwrap();
+
+    assert_eq!(
+        result,
+        ProcessorRun::Completed {
+            task_id: "task-id".to_owned()
+        }
+    );
+    assert!(
+        !fixture
+            .connection
+            .exists::<_, bool>(fixture.task_key("task-id"))
+            .unwrap()
+    );
+    let processed_total: i64 = fixture
+        .connection
+        .get(fixture.processed_total_key())
+        .unwrap();
+    assert_eq!(processed_total, 1);
+}
+
+#[test]
+fn processor_run_once_retries_handler_failure() {
+    let Some(mut fixture) = RedisFixture::new("processor-retry") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+            TaskOption::max_retry(3),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let broker = client.into_broker();
+    let mut processor = Processor::with_retry_delay(
+        broker,
+        |_task: &Task| Err(HandlerError::failed("handler failed")),
+        |_retried, _error: &HandlerError, _task: &Task| Duration::from_secs(60),
+    );
+
+    let result = processor.run_once(&[fixture.queue().to_owned()]).unwrap();
+
+    let retry_at = match result {
+        ProcessorRun::Retried { task_id, retry_at } => {
+            assert_eq!(task_id, "task-id");
+            retry_at
+        }
+        other => panic!("expected retry result, got {other:?}"),
+    };
+    let retry_score: f64 = fixture
+        .connection
+        .zscore(fixture.retry_key(), "task-id")
+        .unwrap();
+    let expected = retry_at
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as f64;
+    assert_eq!(retry_score, expected);
+    let stored: HashMap<String, Vec<u8>> = fixture
+        .connection
+        .hgetall(fixture.task_key("task-id"))
+        .unwrap();
+    assert_eq!(string_field(&stored, "state"), "retry");
+    let retry_msg = decode_msg(stored.get("msg").unwrap());
+    assert_eq!(retry_msg.retried, 1);
+    assert_eq!(retry_msg.error_msg, "handler failed");
+}
+
+#[test]
+fn processor_revoke_deletes_retained_task_without_completed_set() {
+    let Some(mut fixture) = RedisFixture::new("processor-revoke") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+            TaskOption::retention(Duration::from_secs(300)),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let broker = client.into_broker();
+    let mut processor = Processor::with_retry_delay(
+        broker,
+        |_task: &Task| Err(HandlerError::revoke_task("revoke")),
+        |_retried, _error: &HandlerError, _task: &Task| Duration::from_secs(60),
+    );
+
+    let result = processor.run_once(&[fixture.queue().to_owned()]).unwrap();
+
+    assert_eq!(
+        result,
+        ProcessorRun::Revoked {
+            task_id: "task-id".to_owned()
+        }
+    );
+    assert!(
+        !fixture
+            .connection
+            .exists::<_, bool>(fixture.task_key("task-id"))
+            .unwrap()
+    );
+    let completed_score: Option<f64> = fixture
+        .connection
+        .zscore(fixture.completed_key(), "task-id")
+        .unwrap();
+    assert!(completed_score.is_none());
 }
 
 #[test]
