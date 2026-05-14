@@ -2,6 +2,15 @@
 
 ## 2026-05-14
 
+- Added the worker-side retry path: `RetryBroker`, `RetryError`,
+  `RedisRetryPlan`, `RedisBroker::retry`, and the fixed Asynq v0.26.0
+  `retry` Lua script.
+- Covered retry behavior with unit and Redis integration tests for active to
+  retry movement, retry-message mutation, and failed statistics updates.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L380-L418
+- TODO: Add archive and lease-expiration recovery next so the rest of the
+  failure lifecycle can follow the same broker/planning pattern.
+
 - Restructured Redis internals under `src/broker/redis/` and added a
   `broker::redis` module boundary while keeping the public crate re-exports
   stable.

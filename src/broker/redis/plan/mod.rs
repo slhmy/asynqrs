@@ -45,6 +45,15 @@ pub struct RedisCompletePlan {
     call: RedisScriptCall,
 }
 
+/// Redis command intent for retrying a failed active task.
+///
+/// Reference: Asynq v0.26.0 `RDB.Retry`:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L380-L418>.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedisRetryPlan {
+    call: RedisScriptCall,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedisEnqueueOperation {
     PublishQueue { key: String, queue: String },
@@ -82,6 +91,7 @@ pub enum RedisScript {
     DoneUnique,
     MarkAsComplete,
     MarkAsCompleteUnique,
+    Retry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +120,13 @@ pub enum RedisDequeuePlanError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedisCompletePlanError {
+    EmptyQueueName,
+    EmptyTaskId,
+    TimeOverflow(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedisRetryPlanError {
     EmptyQueueName,
     EmptyTaskId,
     TimeOverflow(&'static str),
@@ -203,6 +220,31 @@ impl RedisCompletePlan {
             done_call(message, now)?
         };
         Ok(Self { call })
+    }
+
+    pub fn call(&self) -> &RedisScriptCall {
+        &self.call
+    }
+}
+
+impl RedisRetryPlan {
+    pub fn from_message(
+        message: &TaskMessage,
+        now: SystemTime,
+        retry_at: SystemTime,
+        error_message: &str,
+        is_failure: bool,
+    ) -> Result<Self, RedisRetryPlanError> {
+        if message.queue.trim().is_empty() {
+            return Err(RedisRetryPlanError::EmptyQueueName);
+        }
+        if message.id.trim().is_empty() {
+            return Err(RedisRetryPlanError::EmptyTaskId);
+        }
+
+        Ok(Self {
+            call: retry_call(message, now, retry_at, error_message, is_failure)?,
+        })
     }
 
     pub fn call(&self) -> &RedisScriptCall {
@@ -488,11 +530,53 @@ fn mark_as_complete_call(
     ))
 }
 
+fn retry_call(
+    msg: &TaskMessage,
+    now: SystemTime,
+    retry_at: SystemTime,
+    error_message: &str,
+    is_failure: bool,
+) -> Result<RedisScriptCall, RedisRetryPlanError> {
+    let mut retry_message = msg.clone();
+    retry_message.retried = retry_message.retried.saturating_add(1);
+    retry_message.error_msg = error_message.to_owned();
+    retry_message.last_failed_at = unix_seconds_retry(now, "last failed time")?;
+
+    Ok(RedisScriptCall::new(
+        RedisScript::Retry,
+        vec![
+            keys::active_key(&msg.queue),
+            keys::lease_key(&msg.queue),
+            keys::retry_key(&msg.queue),
+            task_key(msg),
+            keys::processed_key(&msg.queue, now),
+            keys::processed_total_key(&msg.queue),
+            keys::failed_key(&msg.queue, now),
+            keys::failed_total_key(&msg.queue),
+        ],
+        vec![
+            RedisArg::String(msg.id.clone()),
+            encoded_msg_arg(&retry_message),
+            RedisArg::I64(unix_seconds_retry(retry_at, "retry time")?),
+            RedisArg::I64(stats_expire_at_retry(now)?),
+            RedisArg::String(if is_failure { "1" } else { "0" }.to_owned()),
+            RedisArg::I64(i64::MAX),
+        ],
+    ))
+}
+
 fn stats_expire_at(now: SystemTime) -> Result<i64, RedisCompletePlanError> {
     let time = now
         .checked_add(STATS_TTL)
         .ok_or(RedisCompletePlanError::TimeOverflow("stats expiration"))?;
     unix_seconds_complete(time, "stats expiration")
+}
+
+fn stats_expire_at_retry(now: SystemTime) -> Result<i64, RedisRetryPlanError> {
+    let time = now
+        .checked_add(STATS_TTL)
+        .ok_or(RedisRetryPlanError::TimeOverflow("stats expiration"))?;
+    unix_seconds_retry(time, "stats expiration")
 }
 
 fn unix_nanoseconds(time: SystemTime) -> Result<i64, RedisEnqueuePlanError> {
@@ -529,6 +613,16 @@ fn unix_seconds_complete(
     seconds
         .try_into()
         .map_err(|_| RedisCompletePlanError::TimeOverflow(context))
+}
+
+fn unix_seconds_retry(time: SystemTime, context: &'static str) -> Result<i64, RedisRetryPlanError> {
+    let seconds = match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i128::from(duration_seconds(duration)),
+        Err(error) => -i128::from(duration_seconds(error.duration())),
+    };
+    seconds
+        .try_into()
+        .map_err(|_| RedisRetryPlanError::TimeOverflow(context))
 }
 
 fn duration_nanoseconds(duration: Duration) -> i128 {
@@ -577,6 +671,18 @@ impl std::fmt::Display for RedisCompletePlanError {
 }
 
 impl std::error::Error for RedisCompletePlanError {}
+
+impl std::fmt::Display for RedisRetryPlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
+            Self::EmptyTaskId => f.write_str("task id must contain one or more characters"),
+            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
+        }
+    }
+}
+
+impl std::error::Error for RedisRetryPlanError {}
 
 #[cfg(test)]
 mod tests {
@@ -923,6 +1029,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn plans_retry_script_for_failed_active_task() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let retry_at = now + Duration::from_secs(60);
+        let msg = active_message(0, "");
+
+        let plan =
+            RedisRetryPlan::from_message(&msg, now, retry_at, "handler failed", true).unwrap();
+        let call = plan.call();
+
+        assert_eq!(call.script(), RedisScript::Retry);
+        assert_eq!(
+            call.keys(),
+            &[
+                "asynq:{critical}:active".to_owned(),
+                "asynq:{critical}:lease".to_owned(),
+                "asynq:{critical}:retry".to_owned(),
+                "asynq:{critical}:t:task-id".to_owned(),
+                "asynq:{critical}:processed:2023-11-14".to_owned(),
+                "asynq:{critical}:processed".to_owned(),
+                "asynq:{critical}:failed:2023-11-14".to_owned(),
+                "asynq:{critical}:failed".to_owned(),
+            ]
+        );
+        assert_eq!(call.args()[0], RedisArg::String("task-id".to_owned()));
+        assert_retry_message(&call.args()[1], &msg, "handler failed", 1_700_000_000);
+        assert_eq!(call.args()[2], RedisArg::I64(1_700_000_060));
+        assert_eq!(call.args()[3], RedisArg::I64(1_707_776_000));
+        assert_eq!(call.args()[4], RedisArg::String("1".to_owned()));
+        assert_eq!(call.args()[5], RedisArg::I64(i64::MAX));
+    }
+
+    #[test]
+    fn validates_retry_inputs() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut msg = active_message(0, "");
+
+        msg.queue = " ".to_owned();
+        assert_eq!(
+            RedisRetryPlan::from_message(&msg, now, now, "handler failed", true).unwrap_err(),
+            RedisRetryPlanError::EmptyQueueName
+        );
+
+        msg.queue = "critical".to_owned();
+        msg.id = " ".to_owned();
+        assert_eq!(
+            RedisRetryPlan::from_message(&msg, now, now, "handler failed", true).unwrap_err(),
+            RedisRetryPlanError::EmptyTaskId
+        );
+    }
+
     fn only_script(plan: &RedisEnqueuePlan) -> &RedisScriptCall {
         assert_eq!(plan.operations().len(), 2);
         match &plan.operations()[1] {
@@ -947,6 +1104,23 @@ mod tests {
         assert_eq!(decoded.completed_at, completed_at);
         let mut expected = original.clone();
         expected.completed_at = completed_at;
+        assert_eq!(decoded, expected);
+    }
+
+    fn assert_retry_message(
+        arg: &RedisArg,
+        original: &TaskMessage,
+        error_message: &str,
+        last_failed_at: i64,
+    ) {
+        let RedisArg::Bytes(data) = arg else {
+            panic!("expected encoded message bytes, got {arg:?}");
+        };
+        let decoded = TaskMessage::decode_from_slice(data).unwrap();
+        let mut expected = original.clone();
+        expected.retried += 1;
+        expected.error_msg = error_message.to_owned();
+        expected.last_failed_at = last_failed_at;
         assert_eq!(decoded, expected);
     }
 

@@ -11,6 +11,7 @@ pub use executor::{
 pub use plan::{
     DEFAULT_LEASE_DURATION, RedisArg, RedisCompletePlan, RedisCompletePlanError, RedisDequeueCall,
     RedisDequeuePlan, RedisDequeuePlanError, RedisEnqueueOperation, RedisEnqueuePlan,
-    RedisEnqueuePlanError, RedisScript, RedisScriptCall, STATS_TTL,
+    RedisEnqueuePlanError, RedisRetryPlan, RedisRetryPlanError, RedisScript, RedisScriptCall,
+    STATS_TTL,
 };
 pub use scripts::{RedisScriptCallError, RedisScriptResult, RedisScriptSpec};

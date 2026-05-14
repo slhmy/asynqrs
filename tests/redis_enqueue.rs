@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use asynq_rs::{
     BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, RedisBroker,
-    RedisConnectionExecutor, RedisScript, RedisScriptResult, Task, TaskMessage, TaskOption,
-    TaskState,
+    RedisConnectionExecutor, RedisScript, RedisScriptResult, RetryBroker, Task, TaskMessage,
+    TaskOption, TaskState,
 };
 use redis::Commands;
 use testcontainers_modules::{
@@ -239,6 +239,82 @@ fn complete_with_retention_moves_task_to_completed_set() {
 }
 
 #[test]
+fn retry_moves_active_task_to_retry_set_and_records_failure_stats() {
+    let Some(mut fixture) = RedisFixture::new("retry") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+            TaskOption::max_retry(5),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let dequeued = client
+        .broker_mut()
+        .dequeue(&[fixture.queue().to_owned()])
+        .unwrap();
+    client
+        .broker_mut()
+        .retry(
+            dequeued.message(),
+            std::time::SystemTime::now() + Duration::from_secs(60),
+            "handler failed",
+            true,
+        )
+        .unwrap();
+
+    let active_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.active_key(), 0, -1)
+        .unwrap();
+    assert!(active_ids.is_empty());
+    let lease_score: Option<f64> = fixture
+        .connection
+        .zscore(fixture.lease_key(), "task-id")
+        .unwrap();
+    assert!(lease_score.is_none());
+    let retry_score: f64 = fixture
+        .connection
+        .zscore(fixture.retry_key(), "task-id")
+        .unwrap();
+    assert!(retry_score > 0.0);
+
+    let stored: HashMap<String, Vec<u8>> = fixture
+        .connection
+        .hgetall(fixture.task_key("task-id"))
+        .unwrap();
+    assert_eq!(string_field(&stored, "state"), "retry");
+    let retry_msg = decode_msg(stored.get("msg").unwrap());
+    assert_eq!(retry_msg.retried, 1);
+    assert_eq!(retry_msg.error_msg, "handler failed");
+    assert!(retry_msg.last_failed_at > 0);
+
+    let processed_total: i64 = fixture
+        .connection
+        .get(fixture.processed_total_key())
+        .unwrap();
+    let failed_total: i64 = fixture.connection.get(fixture.failed_total_key()).unwrap();
+    assert_eq!(processed_total, 1);
+    assert_eq!(failed_total, 1);
+    let processed_daily_keys: Vec<String> = fixture
+        .connection
+        .keys(fixture.processed_daily_key_pattern())
+        .unwrap();
+    let failed_daily_keys: Vec<String> = fixture
+        .connection
+        .keys(fixture.failed_daily_key_pattern())
+        .unwrap();
+    assert_eq!(processed_daily_keys.len(), 1);
+    assert_eq!(failed_daily_keys.len(), 1);
+}
+
+#[test]
 fn unique_enqueue_sets_unique_key_and_rejects_duplicate() {
     let Some(mut fixture) = RedisFixture::new("unique") else {
         return;
@@ -383,12 +459,24 @@ impl RedisFixture {
         format!("asynq:{{{}}}:completed", self.queue)
     }
 
+    fn retry_key(&self) -> String {
+        format!("asynq:{{{}}}:retry", self.queue)
+    }
+
     fn processed_total_key(&self) -> String {
         format!("asynq:{{{}}}:processed", self.queue)
     }
 
+    fn failed_total_key(&self) -> String {
+        format!("asynq:{{{}}}:failed", self.queue)
+    }
+
     fn processed_daily_key_pattern(&self) -> String {
         format!("asynq:{{{}}}:processed:*", self.queue)
+    }
+
+    fn failed_daily_key_pattern(&self) -> String {
+        format!("asynq:{{{}}}:failed:*", self.queue)
     }
 
     fn scheduled_key(&self) -> String {
