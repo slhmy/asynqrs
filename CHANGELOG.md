@@ -2,6 +2,19 @@
 
 ## 2026-05-15
 
+- Added the first synchronous worker server loop: `Server`, `Sleeper`,
+  `SystemSleeper`, `ShutdownSignal`, `WorkerProcessor`, `ServerRunSummary`, and
+  `ServerError`.
+- `Server::run_until_stopped` now repeatedly calls a processor over configured
+  queues, records completed/retried/archived/revoked/idle counts, sleeps after
+  idle polls, and stops when the caller-provided shutdown signal is set.
+- Covered the loop with unit tests and a Redis integration test that processes
+  one successful task, retries one failed task, then sleeps on an idle poll.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L663-L721
+- TODO: Add worker concurrency, task context timeout/deadline handling, lease
+  extension, requeue-on-shutdown, and sync retry once async/cancellation
+  semantics are modeled.
+
 - Added active-task requeue support: `RequeueBroker`, `RequeueError`,
   `RedisRequeuePlan`, `RedisBroker::requeue`, and the fixed Asynq v0.26.0
   `requeue` Lua script.

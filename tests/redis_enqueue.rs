@@ -4,8 +4,8 @@ use std::time::Duration;
 use asynq_rs::{
     ArchiveBroker, BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, ErrorHandler,
     ForwardBroker, HandlerError, LeaseBroker, Processor, ProcessorRun, RecoverBroker, RedisBroker,
-    RedisConnectionExecutor, RedisScript, RedisScriptResult, RequeueBroker, RetryBroker, Task,
-    TaskMessage, TaskOption, TaskState,
+    RedisConnectionExecutor, RedisScript, RedisScriptResult, RequeueBroker, RetryBroker, Server,
+    ShutdownSignal, Sleeper, Task, TaskMessage, TaskOption, TaskState,
 };
 use redis::Commands;
 use testcontainers_modules::{
@@ -908,6 +908,85 @@ fn processor_revoke_deletes_retained_task_without_completed_set() {
 }
 
 #[test]
+fn server_run_until_stopped_processes_tasks_and_sleeps_when_idle() {
+    let Some(mut fixture) = RedisFixture::new("server-loop") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let successful = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("success-id"),
+        ],
+    );
+    let retried = Task::new_with_options(
+        "email:fail",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("retry-id"),
+            TaskOption::max_retry(3),
+        ],
+    );
+
+    client.enqueue(&successful).unwrap();
+    client.enqueue(&retried).unwrap();
+    let broker = client.into_broker();
+    let processor = Processor::with_retry_delay(
+        broker,
+        |task: &Task| {
+            if task.type_name() == "email:fail" {
+                Err(HandlerError::failed("handler failed"))
+            } else {
+                Ok(())
+            }
+        },
+        |_retried, _error: &HandlerError, _task: &Task| Duration::from_secs(60),
+    );
+    let mut server = Server::with_sleeper(
+        processor,
+        [fixture.queue().to_owned()],
+        RecordingSleeper::default(),
+    )
+    .unwrap()
+    .with_idle_sleep(Duration::from_millis(5));
+    let mut shutdown = StopAfter { remaining_runs: 3 };
+
+    let summary = server.run_until_stopped(&mut shutdown).unwrap();
+
+    assert_eq!(summary.processed(), 2);
+    assert_eq!(summary.completed(), 1);
+    assert_eq!(summary.retried(), 1);
+    assert_eq!(summary.archived(), 0);
+    assert_eq!(summary.revoked(), 0);
+    assert_eq!(summary.idle_polls(), 1);
+    assert_eq!(server.sleeper().durations, [Duration::from_millis(5)]);
+    assert!(
+        !fixture
+            .connection
+            .exists::<_, bool>(fixture.task_key("success-id"))
+            .unwrap()
+    );
+    let retry_fields: HashMap<String, Vec<u8>> = fixture
+        .connection
+        .hgetall(fixture.task_key("retry-id"))
+        .unwrap();
+    assert_eq!(string_field(&retry_fields, "state"), "retry");
+    let retry_msg = decode_msg(retry_fields.get("msg").unwrap());
+    assert_eq!(retry_msg.retried, 1);
+    assert_eq!(retry_msg.error_msg, "handler failed");
+    let processed_total: i64 = fixture
+        .connection
+        .get(fixture.processed_total_key())
+        .unwrap();
+    let failed_total: i64 = fixture.connection.get(fixture.failed_total_key()).unwrap();
+    assert_eq!(processed_total, 2);
+    assert_eq!(failed_total, 1);
+}
+
+#[test]
 fn unique_enqueue_sets_unique_key_and_rejects_duplicate() {
     let Some(mut fixture) = RedisFixture::new("unique") else {
         return;
@@ -1160,5 +1239,32 @@ impl ErrorHandler for RecordingErrorHandler {
     fn handle_error(&mut self, task: &Task, error: &HandlerError) {
         self.errors
             .push((task.type_name().to_owned(), error.to_string()));
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingSleeper {
+    durations: Vec<Duration>,
+}
+
+impl Sleeper for RecordingSleeper {
+    fn sleep(&mut self, duration: Duration) {
+        self.durations.push(duration);
+    }
+}
+
+#[derive(Debug)]
+struct StopAfter {
+    remaining_runs: usize,
+}
+
+impl ShutdownSignal for StopAfter {
+    fn should_stop(&mut self) -> bool {
+        if self.remaining_runs == 0 {
+            true
+        } else {
+            self.remaining_runs -= 1;
+            false
+        }
     }
 }
