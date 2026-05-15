@@ -3,12 +3,11 @@
 ## 2026-05-15
 
 - Added the first async Redis boundary with `AsyncRedisExecutor`,
-  `AsyncRedisConnectionExecutor`, and `AsyncRedisBroker::enqueue`, plus
-  unit tests for the async enqueue path.
+  `AsyncRedisConnectionExecutor`, and async `AsyncRedisBroker` enqueue,
+  dequeue, and complete paths, plus unit tests for those async broker methods.
 - Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735
-- TODO: Port dequeue, complete, retry, archive, recovery, lease extension, and
-  shutdown requeue onto the async Redis path before wiring them into the async
-  server runtime.
+- TODO: Port retry, archive, recovery, lease extension, and shutdown requeue
+  onto the async Redis path before wiring them into the async server runtime.
 
 - Started the async-runtime refactor by adding Tokio-native server boundaries:
   `AsyncServer`, `AsyncWorkerProcessor`, `AsyncSleeper`, `TokioSleeper`, and

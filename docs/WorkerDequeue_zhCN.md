@@ -199,12 +199,13 @@ Tokio-native 的 worker loop 边界：
   合并每个 worker 的 `ServerRunSummary`。
 - `AsyncRedisExecutor` / `AsyncRedisConnectionExecutor`：异步 Redis 命令和 Lua
   script 执行边界。
-- `AsyncRedisBroker::enqueue`：第一条异步 Redis broker 路径，复用同步 enqueue
-  plan 和 Asynq v0.26.0 的 Redis script 语义。
+- `AsyncRedisBroker::enqueue` / `dequeue_with_now` / `complete_with_now`：
+  第一批异步 Redis broker 路径，复用同步 plan 和 Asynq v0.26.0 的 Redis script
+  语义。
 
-当前 dequeue、complete、retry、archive、forward、recover、lease extender、
-shutdown requeue 和 `Processor` handler 执行还没有迁到 async；这些会沿着
-`AsyncServer` / `AsyncRedisBroker` 的边界继续推进。
+当前 retry、archive、forward、recover、lease extender、shutdown requeue 和
+`Processor` handler 执行还没有迁到 async；这些会沿着 `AsyncServer` /
+`AsyncRedisBroker` 的边界继续推进。
 
 ## Dequeue
 

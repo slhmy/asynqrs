@@ -562,6 +562,68 @@ where
         Ok(())
     }
 
+    pub async fn dequeue_with_now(
+        &mut self,
+        queues: &[String],
+        now: SystemTime,
+    ) -> Result<DequeuedTask, DequeueError> {
+        let redis_plan = RedisDequeuePlan::from_queues(queues, now)
+            .map_err(RedisBrokerError::DequeuePlan)
+            .map_err(DequeueError::from)?;
+
+        for call in redis_plan.queue_calls() {
+            RedisScript::Dequeue
+                .validate_call(call.keys(), call.args())
+                .map_err(RedisBrokerError::ScriptCall)
+                .map_err(DequeueError::from)?;
+            let Some(data) = self
+                .executor
+                .eval_script_bytes(call)
+                .await
+                .map_err(RedisBrokerError::Executor)
+                .map_err(DequeueError::from)?
+            else {
+                continue;
+            };
+            let message = TaskMessage::decode_from_slice(&data)
+                .map_err(RedisBrokerError::Decode)
+                .map_err(DequeueError::from)?;
+            return Ok(DequeuedTask::new(message, redis_plan.lease_expires_at()));
+        }
+
+        Err(DequeueError::NoProcessableTask)
+    }
+
+    pub async fn complete_with_now(
+        &mut self,
+        message: &TaskMessage,
+        now: SystemTime,
+    ) -> Result<(), CompleteError> {
+        let redis_plan = RedisCompletePlan::from_message(message, now)
+            .map_err(RedisBrokerError::CompletePlan)
+            .map_err(CompleteError::from)?;
+        let call = redis_plan.call();
+        call.validate()
+            .map_err(RedisBrokerError::ScriptCall)
+            .map_err(CompleteError::from)?;
+        let status = self
+            .executor
+            .eval_script_status(call)
+            .await
+            .map_err(RedisBrokerError::Executor)
+            .map_err(CompleteError::from)?;
+        if status == "OK" {
+            Ok(())
+        } else {
+            Err(CompleteError::from(
+                RedisBrokerError::UnexpectedScriptStatus {
+                    script: call.script(),
+                    status,
+                },
+            ))
+        }
+    }
+
     async fn execute(&mut self, operation: &RedisEnqueueOperation) -> Result<(), BrokerError> {
         match operation {
             RedisEnqueueOperation::PublishQueue { key, queue } => {
@@ -1256,6 +1318,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn async_broker_dequeues_first_available_task() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
+        msg.id = "task-id".to_owned();
+        msg.queue = "critical".to_owned();
+        let executor = FakeExecutor {
+            script_bytes_results: vec![None, Some(msg.encode_to_vec())],
+            ..FakeExecutor::default()
+        };
+        let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
+
+        let task = broker
+            .dequeue_with_now(&["empty".to_owned(), "critical".to_owned()], now)
+            .await
+            .unwrap();
+
+        assert_eq!(task.message(), &msg);
+        assert_eq!(
+            task.lease_expires_at(),
+            UNIX_EPOCH + Duration::from_secs(1_700_000_030)
+        );
+        assert_eq!(broker.executor().calls.len(), 2);
+        let ExecutorCall::EvalScriptBytes { script, keys, args } = &broker.executor().calls[0]
+        else {
+            panic!("expected script call");
+        };
+        assert_eq!(*script, RedisScript::Dequeue);
+        assert_eq!(
+            keys,
+            &[
+                "asynq:{empty}:pending".to_owned(),
+                "asynq:{empty}:active".to_owned(),
+                "asynq:{empty}:lease".to_owned(),
+                "asynq:{empty}:t:".to_owned(),
+                "asynq:{empty}:paused".to_owned(),
+            ]
+        );
+        assert_eq!(args, &[RedisArg::I64(1_700_000_030)]);
+    }
+
+    #[tokio::test]
+    async fn async_broker_completes_retained_task_with_mark_as_complete_script() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
+        msg.id = "task-id".to_owned();
+        msg.queue = "critical".to_owned();
+        msg.retention = 300;
+        let executor = FakeExecutor::default();
+        let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
+
+        broker.complete_with_now(&msg, now).await.unwrap();
+
+        let ExecutorCall::EvalScriptStatus { script, keys, args } = &broker.executor().calls[0]
+        else {
+            panic!("expected script call");
+        };
+        assert_eq!(*script, RedisScript::MarkAsComplete);
+        assert_eq!(
+            keys,
+            &[
+                "asynq:{critical}:active".to_owned(),
+                "asynq:{critical}:lease".to_owned(),
+                "asynq:{critical}:completed".to_owned(),
+                "asynq:{critical}:t:task-id".to_owned(),
+                "asynq:{critical}:processed:2023-11-14".to_owned(),
+                "asynq:{critical}:processed".to_owned(),
+            ]
+        );
+        assert_eq!(args[0], RedisArg::String("task-id".to_owned()));
+        assert_eq!(args[2], RedisArg::I64(1_700_000_300));
+        assert!(matches!(args[3], RedisArg::Bytes(_)));
+    }
+
+    #[tokio::test]
     async fn async_broker_maps_task_id_conflict_result() {
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let task = Task::new("email:welcome", Vec::new());
@@ -1285,6 +1421,24 @@ mod tests {
         let error = broker.enqueue(&plan).await.unwrap_err();
 
         assert_eq!(error, BrokerError::Other("connection closed".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn async_broker_complete_maps_executor_errors() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
+        msg.id = "task-id".to_owned();
+        msg.queue = "critical".to_owned();
+        msg.retention = 30;
+        let executor = FakeExecutor {
+            script_error: Some(RedisExecutorError::new("connection closed")),
+            ..FakeExecutor::default()
+        };
+        let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
+
+        let error = broker.complete_with_now(&msg, now).await.unwrap_err();
+
+        assert_eq!(error, CompleteError::Other("connection closed".to_owned()));
     }
 
     #[test]
