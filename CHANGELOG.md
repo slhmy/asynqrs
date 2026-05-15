@@ -2,6 +2,12 @@
 
 ## 2026-05-15
 
+- Split Redis broker sync and async implementations into
+  `src/broker/redis/broker/sync.rs` and `src/broker/redis/broker/async.rs`,
+  leaving `broker.rs` as the small type/trait/shared-helper entry point.
+- No public API changes; this is a maintenance-only organization pass.
+- No new TODOs.
+
 - Split Redis broker error types and lifecycle error mappings into
   `src/broker/redis/broker/error.rs`, leaving `broker.rs` focused on broker
   execution logic.
