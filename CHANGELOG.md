@@ -2,6 +2,15 @@
 
 ## 2026-05-15
 
+- Added async Redis broker lease extension and active-task requeue methods:
+  `AsyncRedisBroker::extend_lease_with_now` and
+  `AsyncRedisBroker::requeue_with_now`.
+- Covered the async lease extension and requeue paths with unit tests against
+  the fake async Redis executor.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go
+- TODO: Wire these async lifecycle operations into a real async worker
+  processor and shutdown flow.
+
 - Added async Redis broker maintenance methods:
   `AsyncRedisBroker::forward_with_now` for scheduled/retry forwarding and
   `AsyncRedisBroker::recover_expired_leases_with_now` for lease-expired

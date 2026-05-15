@@ -2,9 +2,10 @@ use std::time::SystemTime;
 
 use crate::{
     ArchiveError, AsyncRedisExecutor, BrokerError, Clock, CompleteError, DequeueError,
-    DequeuedTask, EnqueuePlan, ForwardError, RecoverError, RecoverResult, RedisArchivePlan,
-    RedisCompletePlan, RedisDequeuePlan, RedisEnqueueOperation, RedisEnqueuePlan, RedisForwardPlan,
-    RedisRecoverPlan, RedisRetryPlan, RedisScript, RetryError, TaskMessage,
+    DequeuedTask, EnqueuePlan, ForwardError, LeaseError, LeaseExtension, RecoverError,
+    RecoverResult, RedisArchivePlan, RedisCompletePlan, RedisDequeuePlan, RedisEnqueueOperation,
+    RedisEnqueuePlan, RedisExtendLeasePlan, RedisForwardPlan, RedisRecoverPlan, RedisRequeuePlan,
+    RedisRetryPlan, RedisScript, RequeueError, RetryError, TaskMessage,
 };
 
 use super::{AsyncRedisBroker, RedisBrokerError, map_script_result};
@@ -166,6 +167,32 @@ where
         }
     }
 
+    pub async fn requeue_with_now(&mut self, message: &TaskMessage) -> Result<(), RequeueError> {
+        let redis_plan = RedisRequeuePlan::from_message(message)
+            .map_err(RedisBrokerError::RequeuePlan)
+            .map_err(RequeueError::from)?;
+        let call = redis_plan.call();
+        call.validate()
+            .map_err(RedisBrokerError::ScriptCall)
+            .map_err(RequeueError::from)?;
+        let status = self
+            .executor
+            .eval_script_status(call)
+            .await
+            .map_err(RedisBrokerError::Executor)
+            .map_err(RequeueError::from)?;
+        if status == "OK" {
+            Ok(())
+        } else {
+            Err(RequeueError::from(
+                RedisBrokerError::UnexpectedScriptStatus {
+                    script: call.script(),
+                    status,
+                },
+            ))
+        }
+    }
+
     pub async fn forward_with_now(
         &mut self,
         queue: &str,
@@ -239,6 +266,28 @@ where
         }
 
         Ok(RecoverResult::new(retried, archived))
+    }
+
+    pub async fn extend_lease_with_now(
+        &mut self,
+        queue: &str,
+        task_id: &str,
+        now: SystemTime,
+    ) -> Result<LeaseExtension, LeaseError> {
+        let redis_plan = RedisExtendLeasePlan::from_queue_and_task_id(queue, task_id, now)
+            .map_err(RedisBrokerError::ExtendLeasePlan)
+            .map_err(LeaseError::from)?;
+        let _updated = self
+            .executor
+            .zadd_existing(
+                redis_plan.key(),
+                redis_plan.lease_expires_at_seconds(),
+                redis_plan.task_id(),
+            )
+            .await
+            .map_err(RedisBrokerError::Executor)
+            .map_err(LeaseError::from)?;
+        Ok(LeaseExtension::new(redis_plan.lease_expires_at()))
     }
 
     async fn execute(&mut self, operation: &RedisEnqueueOperation) -> Result<(), BrokerError> {
