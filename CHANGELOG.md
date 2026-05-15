@@ -2,6 +2,17 @@
 
 ## 2026-05-15
 
+- Added async Redis broker maintenance methods:
+  `AsyncRedisBroker::forward_with_now` for scheduled/retry forwarding and
+  `AsyncRedisBroker::recover_expired_leases_with_now` for lease-expired
+  recovery through retry/archive.
+- Covered the async forward and recover paths with unit tests against the fake
+  async Redis executor.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L861-L900
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/recoverer.go
+- TODO: Port lease extension and shutdown requeue onto the async Redis path
+  before wiring a real async processor into `AsyncServer`.
+
 - Split Redis broker sync and async implementations into
   `src/broker/redis/broker/sync.rs` and `src/broker/redis/broker/async.rs`,
   leaving `broker.rs` as the small type/trait/shared-helper entry point.
@@ -32,8 +43,8 @@
   dequeue, complete, retry, and archive paths, plus unit tests for those async
   broker methods.
 - Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735
-- TODO: Port recovery, lease extension, and shutdown requeue onto the async
-  Redis path before wiring them into the async server runtime.
+- TODO: Port lease extension and shutdown requeue onto the async Redis path
+  before wiring them into the async server runtime.
 
 - Started the async-runtime refactor by adding Tokio-native server boundaries:
   `AsyncServer`, `AsyncWorkerProcessor`, `AsyncSleeper`, `TokioSleeper`, and

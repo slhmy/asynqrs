@@ -2,8 +2,9 @@ use std::time::SystemTime;
 
 use crate::{
     ArchiveError, AsyncRedisExecutor, BrokerError, Clock, CompleteError, DequeueError,
-    DequeuedTask, EnqueuePlan, RedisArchivePlan, RedisCompletePlan, RedisDequeuePlan,
-    RedisEnqueueOperation, RedisEnqueuePlan, RedisRetryPlan, RedisScript, RetryError, TaskMessage,
+    DequeuedTask, EnqueuePlan, ForwardError, RecoverError, RecoverResult, RedisArchivePlan,
+    RedisCompletePlan, RedisDequeuePlan, RedisEnqueueOperation, RedisEnqueuePlan, RedisForwardPlan,
+    RedisRecoverPlan, RedisRetryPlan, RedisScript, RetryError, TaskMessage,
 };
 
 use super::{AsyncRedisBroker, RedisBrokerError, map_script_result};
@@ -163,6 +164,81 @@ where
                 },
             ))
         }
+    }
+
+    pub async fn forward_with_now(
+        &mut self,
+        queue: &str,
+        now: SystemTime,
+        scheduled: bool,
+    ) -> Result<usize, ForwardError> {
+        let redis_plan = if scheduled {
+            RedisForwardPlan::from_scheduled_queue(queue, now)
+        } else {
+            RedisForwardPlan::from_retry_queue(queue, now)
+        }
+        .map_err(RedisBrokerError::ForwardPlan)
+        .map_err(ForwardError::from)?;
+        let call = redis_plan.call();
+        call.validate()
+            .map_err(RedisBrokerError::ScriptCall)
+            .map_err(ForwardError::from)?;
+        let result = self
+            .executor
+            .eval_script_int(call)
+            .await
+            .map_err(RedisBrokerError::Executor)
+            .map_err(ForwardError::from)?;
+        if result < 0 {
+            return Err(ForwardError::Other(format!(
+                "unexpected {:?} script result: {result}",
+                call.script()
+            )));
+        }
+        Ok(result as usize)
+    }
+
+    pub async fn recover_expired_leases_with_now(
+        &mut self,
+        queue: &str,
+        now: SystemTime,
+        retry_at: SystemTime,
+        error_message: &str,
+    ) -> Result<RecoverResult, RecoverError> {
+        let redis_plan = RedisRecoverPlan::from_queue(queue, now)
+            .map_err(RedisBrokerError::RecoverPlan)
+            .map_err(RecoverError::from)?;
+        let call = redis_plan.call();
+        call.validate()
+            .map_err(RedisBrokerError::ScriptCall)
+            .map_err(RecoverError::from)?;
+        let messages = self
+            .executor
+            .eval_script_byte_vec(call)
+            .await
+            .map_err(RedisBrokerError::Executor)
+            .map_err(RecoverError::from)?;
+
+        let mut retried = 0;
+        let mut archived = 0;
+        for data in messages {
+            let message = TaskMessage::decode_from_slice(&data)
+                .map_err(RedisBrokerError::Decode)
+                .map_err(RecoverError::from)?;
+            if message.retried >= message.retry {
+                self.archive_with_now(&message, now, now, error_message, true)
+                    .await
+                    .map_err(|error| RecoverError::Other(error.to_string()))?;
+                archived += 1;
+            } else {
+                self.retry_with_now(&message, now, retry_at, error_message, true)
+                    .await
+                    .map_err(|error| RecoverError::Other(error.to_string()))?;
+                retried += 1;
+            }
+        }
+
+        Ok(RecoverResult::new(retried, archived))
     }
 
     async fn execute(&mut self, operation: &RedisEnqueueOperation) -> Result<(), BrokerError> {

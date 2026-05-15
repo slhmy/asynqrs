@@ -473,6 +473,119 @@ async fn async_broker_complete_maps_executor_errors() {
     assert_eq!(error, CompleteError::Other("connection closed".to_owned()));
 }
 
+#[tokio::test]
+async fn async_broker_forwards_scheduled_tasks_with_forward_script() {
+    let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let executor = FakeExecutor {
+        script_int_results: vec![2],
+        ..FakeExecutor::default()
+    };
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
+
+    let moved = broker
+        .forward_with_now("critical", now, true)
+        .await
+        .unwrap();
+
+    assert_eq!(moved, 2);
+    let calls = &broker.executor().calls;
+    assert_eq!(calls.len(), 1);
+    let ExecutorCall::EvalScriptInt { script, keys, args } = &calls[0] else {
+        panic!("expected forward script call");
+    };
+    assert_eq!(*script, RedisScript::Forward);
+    assert_eq!(
+        keys,
+        &[
+            "asynq:{critical}:scheduled".to_owned(),
+            "asynq:{critical}:pending".to_owned(),
+            "asynq:{critical}:t:".to_owned(),
+        ]
+    );
+    assert_eq!(args[0], RedisArg::I64(1_700_000_000));
+    assert_eq!(args[1], RedisArg::I64(1_700_000_000_000_000_000));
+}
+
+#[tokio::test]
+async fn async_broker_forwards_retry_tasks_with_forward_script() {
+    let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let executor = FakeExecutor {
+        script_int_results: vec![1],
+        ..FakeExecutor::default()
+    };
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
+
+    let moved = broker
+        .forward_with_now("critical", now, false)
+        .await
+        .unwrap();
+
+    assert_eq!(moved, 1);
+    let ExecutorCall::EvalScriptInt { script, keys, .. } = &broker.executor().calls[0] else {
+        panic!("expected forward script call");
+    };
+    assert_eq!(*script, RedisScript::Forward);
+    assert_eq!(
+        keys,
+        &[
+            "asynq:{critical}:retry".to_owned(),
+            "asynq:{critical}:pending".to_owned(),
+            "asynq:{critical}:t:".to_owned(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn async_broker_recovers_expired_leases_to_retry_or_archive() {
+    let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let retry_at = now + Duration::from_secs(60);
+    let mut retry_msg = TaskMessage::from_task(&Task::new("email:welcome", b"retry".to_vec()));
+    retry_msg.id = "retry-id".to_owned();
+    retry_msg.queue = "critical".to_owned();
+    retry_msg.retry = 3;
+    retry_msg.retried = 1;
+    let mut archive_msg = TaskMessage::from_task(&Task::new("email:welcome", b"archive".to_vec()));
+    archive_msg.id = "archive-id".to_owned();
+    archive_msg.queue = "critical".to_owned();
+    archive_msg.retry = 1;
+    archive_msg.retried = 1;
+    let executor = FakeExecutor {
+        script_byte_vec_results: vec![vec![retry_msg.encode_to_vec(), archive_msg.encode_to_vec()]],
+        script_status_results: vec!["OK".to_owned(), "OK".to_owned()],
+        ..FakeExecutor::default()
+    };
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
+
+    let result = broker
+        .recover_expired_leases_with_now("critical", now, retry_at, "lease expired")
+        .await
+        .unwrap();
+
+    assert_eq!(result.retried(), 1);
+    assert_eq!(result.archived(), 1);
+    assert_eq!(broker.executor().calls.len(), 3);
+    let ExecutorCall::EvalScriptByteVec { script, keys, args } = &broker.executor().calls[0] else {
+        panic!("expected list expired lease script call");
+    };
+    assert_eq!(*script, RedisScript::ListLeaseExpired);
+    assert_eq!(
+        keys,
+        &[
+            "asynq:{critical}:lease".to_owned(),
+            "asynq:{critical}:t:".to_owned(),
+        ]
+    );
+    assert_eq!(args, &[RedisArg::I64(1_700_000_000)]);
+    let ExecutorCall::EvalScriptStatus { script, .. } = &broker.executor().calls[1] else {
+        panic!("expected retry script call");
+    };
+    assert_eq!(*script, RedisScript::Retry);
+    let ExecutorCall::EvalScriptStatus { script, .. } = &broker.executor().calls[2] else {
+        panic!("expected archive script call");
+    };
+    assert_eq!(*script, RedisScript::Archive);
+}
+
 #[test]
 fn executes_unique_scheduled_script() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
