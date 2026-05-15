@@ -2,9 +2,9 @@ use std::time::SystemTime;
 
 use crate::{
     ArchiveError, AsyncArchiveBroker, AsyncCompleteBroker, AsyncDequeueBroker, AsyncForwardBroker,
-    AsyncLeaseBroker, AsyncRecoverBroker, AsyncRedisExecutor, AsyncRetryBroker, BrokerError, Clock,
-    CompleteError, DequeueError, DequeuedTask, EnqueuePlan, ForwardError, LeaseError,
-    LeaseExtension, RecoverError, RecoverResult, RedisArchivePlan, RedisCompletePlan,
+    AsyncLeaseBroker, AsyncRecoverBroker, AsyncRedisExecutor, AsyncRequeueBroker, AsyncRetryBroker,
+    BrokerError, Clock, CompleteError, DequeueError, DequeuedTask, EnqueuePlan, ForwardError,
+    LeaseError, LeaseExtension, RecoverError, RecoverResult, RedisArchivePlan, RedisCompletePlan,
     RedisDequeuePlan, RedisEnqueueOperation, RedisEnqueuePlan, RedisExtendLeasePlan,
     RedisForwardPlan, RedisRecoverPlan, RedisRequeuePlan, RedisRetryPlan, RedisScript,
     RequeueError, RetryError, TaskMessage,
@@ -102,6 +102,17 @@ where
         self.extend_lease_with_now(queue, task_id, self.clock.now())
             .await
             .map(|_| ())
+    }
+}
+
+#[async_trait::async_trait]
+impl<E, C> AsyncRequeueBroker for AsyncRedisBroker<E, C>
+where
+    E: AsyncRedisExecutor + Send,
+    C: Clock + Send + Sync,
+{
+    async fn requeue(&mut self, message: &TaskMessage) -> Result<(), RequeueError> {
+        self.requeue_with_now(message).await
     }
 }
 

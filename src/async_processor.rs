@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use crate::{
     ArchiveError, AsyncWorkerProcessor, CompleteError, DEFAULT_SERVER_RECOVER_RETRY_DELAY,
     DequeueError, DequeuedTask, ForwardError, HandlerError, IsFailure, LeaseError,
-    NoopErrorHandler, ProcessorError, ProcessorRun, RecoverError, RecoverResult, RetryDelay,
-    RetryError, ServerMaintenanceRun, SystemClock, Task, TaskMessage,
+    NoopErrorHandler, ProcessorError, ProcessorRun, RecoverError, RecoverResult, RequeueError,
+    RetryDelay, RetryError, ServerMaintenanceRun, SystemClock, Task, TaskMessage,
 };
 
 /// Async minimal broker interface for the worker dequeue path.
@@ -91,6 +91,16 @@ pub trait AsyncRecoverBroker {
         retry_at: SystemTime,
         error_message: &str,
     ) -> Result<RecoverResult, RecoverError>;
+}
+
+/// Async broker interface for moving an active task back to pending during
+/// worker shutdown.
+///
+/// Reference: Asynq v0.26.0 `RDB.Requeue`:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L486-L506>.
+#[async_trait]
+pub trait AsyncRequeueBroker {
+    async fn requeue(&mut self, message: &TaskMessage) -> Result<(), RequeueError>;
 }
 
 /// Processes a single task on an async runtime.
@@ -205,6 +215,7 @@ pub struct AsyncProcessor<
     is_failure: I,
     error_handler: E,
     lease_extender: L,
+    active_message: Option<TaskMessage>,
 }
 
 impl<B, H> AsyncProcessor<B, H, crate::DefaultRetryDelay, SystemClock> {
@@ -251,6 +262,7 @@ impl<B, H, R, C, I, E, L> AsyncProcessor<B, H, R, C, I, E, L> {
             is_failure,
             error_handler,
             lease_extender,
+            active_message: None,
         }
     }
 
@@ -263,6 +275,7 @@ impl<B, H, R, C, I, E, L> AsyncProcessor<B, H, R, C, I, E, L> {
             is_failure,
             error_handler: self.error_handler,
             lease_extender: self.lease_extender,
+            active_message: self.active_message,
         }
     }
 
@@ -275,6 +288,7 @@ impl<B, H, R, C, I, E, L> AsyncProcessor<B, H, R, C, I, E, L> {
             is_failure: self.is_failure,
             error_handler,
             lease_extender: self.lease_extender,
+            active_message: self.active_message,
         }
     }
 
@@ -290,6 +304,7 @@ impl<B, H, R, C, I, E, L> AsyncProcessor<B, H, R, C, I, E, L> {
             is_failure: self.is_failure,
             error_handler: self.error_handler,
             lease_extender,
+            active_message: self.active_message,
         }
     }
 
@@ -325,18 +340,26 @@ where
 
         let message = dequeued.message().clone();
         let task = task_from_message(&message);
-        self.lease_extender
+        self.active_message = Some(message.clone());
+        if let Err(error) = self
+            .lease_extender
             .before_process(&mut self.broker, &message)
-            .await?;
-        match self.handler.process_task(&task).await {
-            Ok(()) => {
-                self.broker.complete(&message).await?;
-                Ok(ProcessorRun::Completed {
-                    task_id: message.id,
-                })
-            }
-            Err(error) => self.handle_failure(message, task, error).await,
+            .await
+        {
+            self.active_message = None;
+            return Err(error.into());
         }
+        let result = match self.handler.process_task(&task).await {
+            Ok(()) => match self.broker.complete(&message).await {
+                Ok(()) => Ok(ProcessorRun::Completed {
+                    task_id: message.id,
+                }),
+                Err(error) => Err(error.into()),
+            },
+            Err(error) => self.handle_failure(message, task, error).await,
+        };
+        self.active_message = None;
+        result
     }
 
     async fn handle_failure(
@@ -406,6 +429,23 @@ where
 
 impl<B, H, R, C, I, E, L> AsyncProcessor<B, H, R, C, I, E, L>
 where
+    B: AsyncRequeueBroker + Send,
+{
+    /// Requeues the task currently owned by this worker, if any.
+    ///
+    /// Reference: Asynq v0.26.0 worker shutdown requeues active tasks through
+    /// `RDB.Requeue`:
+    /// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L486-L506>.
+    pub async fn shutdown(&mut self) -> Result<(), ProcessorError> {
+        if let Some(message) = self.active_message.take() {
+            self.broker.requeue(&message).await?;
+        }
+        Ok(())
+    }
+}
+
+impl<B, H, R, C, I, E, L> AsyncProcessor<B, H, R, C, I, E, L>
+where
     B: AsyncForwardBroker + AsyncRecoverBroker + Send,
     C: crate::Clock + Send + Sync,
 {
@@ -459,6 +499,7 @@ where
         + AsyncCompleteBroker
         + AsyncRetryBroker
         + AsyncArchiveBroker
+        + AsyncRequeueBroker
         + AsyncForwardBroker
         + AsyncRecoverBroker
         + Send,
@@ -478,6 +519,10 @@ where
         queues: &[String],
     ) -> Result<ServerMaintenanceRun, ProcessorError> {
         AsyncProcessor::run_maintenance(self, queues).await
+    }
+
+    async fn shutdown(&mut self) -> Result<(), ProcessorError> {
+        AsyncProcessor::shutdown(self).await
     }
 }
 
@@ -502,6 +547,7 @@ mod tests {
         completed: Vec<String>,
         retried: Vec<(String, SystemTime, String, bool)>,
         archived: Vec<(String, SystemTime, String, bool)>,
+        requeued: Vec<String>,
         lease_extensions: Vec<(String, String)>,
         extend_lease_error: Option<LeaseError>,
         forward_scheduled: usize,
@@ -570,6 +616,14 @@ mod tests {
             if let Some(error) = self.extend_lease_error.clone() {
                 return Err(error);
             }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AsyncRequeueBroker for RecordingAsyncBroker {
+        async fn requeue(&mut self, message: &TaskMessage) -> Result<(), RequeueError> {
+            self.requeued.push(message.id.clone());
             Ok(())
         }
     }
@@ -758,6 +812,24 @@ mod tests {
             processor.broker().lease_extensions,
             [("critical".to_owned(), "task-id".to_owned())]
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_requeues_active_task() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let broker = RecordingAsyncBroker::default();
+        let mut processor = AsyncProcessor::with_parts(
+            broker,
+            |_task: &Task| Ok::<(), HandlerError>(()),
+            DefaultRetryDelay,
+            TestClock(now),
+        );
+        processor.active_message = Some(message("task-id"));
+
+        processor.shutdown().await.unwrap();
+
+        assert_eq!(processor.broker().requeued, ["task-id"]);
+        assert!(processor.active_message.is_none());
     }
 
     #[tokio::test]

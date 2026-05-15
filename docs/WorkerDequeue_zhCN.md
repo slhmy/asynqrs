@@ -194,17 +194,25 @@ Tokio-native 的 worker loop 边界：
 - `AsyncWorkerProcessor`：异步版本的 worker processor trait。
 - `AsyncSleeper` / `TokioSleeper`：异步 idle sleep 抽象。
 - `AsyncServer::run_until_stopped`：用 `tokio::sync::watch` 接收 shutdown
-  signal，循环执行 maintenance、`run_once` 和 idle sleep。
+  signal，循环执行 maintenance、`run_once` 和 idle sleep；shutdown 到来时会
+  取消正在等待的 `run_once`，并调用 processor 的 async shutdown hook。
 - `AsyncServer::run_until_stopped_parallel`：用 Tokio task 跑多个 worker，并
   合并每个 worker 的 `ServerRunSummary`。
 - `AsyncRedisExecutor` / `AsyncRedisConnectionExecutor`：异步 Redis 命令和 Lua
   script 执行边界。
 - `AsyncRedisBroker::enqueue` / `dequeue_with_now` / `complete_with_now` /
   `retry_with_now` / `archive_with_now` / `forward_with_now` /
-  `recover_expired_leases_with_now`：第一批异步 Redis broker 路径，复用同步 plan
-  和 Asynq v0.26.0 的 Redis script 语义。
+  `requeue_with_now` / `recover_expired_leases_with_now`：第一批异步 Redis
+  broker 路径，复用同步 plan 和 Asynq v0.26.0 的 Redis script 语义。
 
-当前 lease extender、shutdown requeue 和 `Processor` handler 执行还没有迁到
+`AsyncProcessor` 会在 handler 执行期间记录当前 active task。`AsyncServer`
+收到 shutdown signal 后取消 in-flight `run_once`，再调用 processor shutdown
+hook；`AsyncProcessor` 会通过 `AsyncRequeueBroker::requeue` 把这个 active task
+放回 pending。这个路径已经接到 `AsyncRedisBroker`，用于 worker 停止时避免
+正在执行的任务长期留在 active set。
+
+当前 background lease extender、handler panic capture、timeout/deadline
+cancellation，以及和上游一样独立定时运行的 forwarder/recoverer 间隔还没有迁到
 async；这些会沿着 `AsyncServer` / `AsyncRedisBroker` 的边界继续推进。
 
 ## Dequeue

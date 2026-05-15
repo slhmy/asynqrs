@@ -205,6 +205,8 @@ pub enum ProcessorError {
     Forward(#[from] ForwardError),
     #[error("failed to recover expired leases: {0}")]
     Recover(#[from] RecoverError),
+    #[error("failed to requeue active task: {0}")]
+    Requeue(#[from] crate::RequeueError),
     #[error("{0} overflowed")]
     TimeOverflow(&'static str),
 }

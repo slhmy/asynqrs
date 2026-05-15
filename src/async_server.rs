@@ -43,6 +43,10 @@ pub trait AsyncWorkerProcessor {
     ) -> Result<ServerMaintenanceRun, ProcessorError> {
         Ok(ServerMaintenanceRun::default())
     }
+
+    async fn shutdown(&mut self) -> Result<(), ProcessorError> {
+        Ok(())
+    }
 }
 
 impl<P> AsyncServer<P, TokioSleeper> {
@@ -179,7 +183,16 @@ where
     let mut summary = ServerRunSummary::default();
     while !*shutdown.borrow() {
         summary.record_maintenance(processor.run_maintenance(queues).await?);
-        match processor.run_once(queues).await? {
+        let run = tokio::select! {
+            run = processor.run_once(queues) => run?,
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+                continue;
+            }
+        };
+        match run {
             ProcessorRun::NoProcessableTask => {
                 summary.record_idle_poll();
                 tokio::select! {
@@ -194,6 +207,7 @@ where
             result => summary.record(result),
         }
     }
+    processor.shutdown().await?;
     Ok(summary)
 }
 
@@ -223,6 +237,7 @@ mod tests {
         results: Arc<Mutex<Vec<Result<ProcessorRun, ProcessorError>>>>,
         queue_calls: Arc<Mutex<Vec<Vec<String>>>>,
         maintenance_calls: Arc<Mutex<Vec<Vec<String>>>>,
+        shutdown_calls: Arc<Mutex<usize>>,
     }
 
     #[async_trait]
@@ -243,6 +258,11 @@ mod tests {
         ) -> Result<ServerMaintenanceRun, ProcessorError> {
             self.maintenance_calls.lock().await.push(queues.to_vec());
             Ok(ServerMaintenanceRun::default())
+        }
+
+        async fn shutdown(&mut self) -> Result<(), ProcessorError> {
+            *self.shutdown_calls.lock().await += 1;
+            Ok(())
         }
     }
 
@@ -269,6 +289,7 @@ mod tests {
             ])),
             queue_calls: Arc::new(Mutex::new(Vec::new())),
             maintenance_calls: Arc::new(Mutex::new(Vec::new())),
+            shutdown_calls: Arc::new(Mutex::new(0)),
         };
         let sleeper = RecordingAsyncSleeper::default();
         let durations = Arc::clone(&sleeper.durations);
@@ -302,12 +323,52 @@ mod tests {
         drop(shutdown_rx);
     }
 
+    #[derive(Debug, Clone, Default)]
+    struct BlockingAsyncProcessor {
+        shutdown_calls: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl AsyncWorkerProcessor for BlockingAsyncProcessor {
+        async fn run_once(&mut self, _queues: &[String]) -> Result<ProcessorRun, ProcessorError> {
+            std::future::pending().await
+        }
+
+        async fn shutdown(&mut self) -> Result<(), ProcessorError> {
+            *self.shutdown_calls.lock().await += 1;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_in_flight_run_and_calls_processor_shutdown() {
+        let processor = BlockingAsyncProcessor::default();
+        let shutdown_calls = Arc::clone(&processor.shutdown_calls);
+        let mut server =
+            AsyncServer::with_sleeper(processor, ["critical"], RecordingAsyncSleeper::default())
+                .unwrap();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = tokio::spawn(async move { server.run_until_stopped(shutdown_rx).await });
+
+        tokio::task::yield_now().await;
+        shutdown_tx.send(true).unwrap();
+        let summary = tokio::time::timeout(Duration::from_millis(100), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(summary.processed(), 0);
+        assert_eq!(*shutdown_calls.lock().await, 1);
+    }
+
     #[tokio::test]
     async fn rejects_zero_parallel_workers() {
         let processor = RecordingAsyncProcessor {
             results: Arc::new(Mutex::new(Vec::new())),
             queue_calls: Arc::new(Mutex::new(Vec::new())),
             maintenance_calls: Arc::new(Mutex::new(Vec::new())),
+            shutdown_calls: Arc::new(Mutex::new(0)),
         };
         let server = AsyncServer::new(processor, ["critical"]).unwrap();
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);

@@ -2,6 +2,19 @@
 
 ## 2026-05-15
 
+- Added async worker shutdown requeue: `AsyncServer` now cancels an in-flight
+  `run_once` when its Tokio watch shutdown signal fires, then calls the
+  processor shutdown hook; `AsyncProcessor` tracks the active task and requeues
+  it through the new `AsyncRequeueBroker` trait wired to `AsyncRedisBroker`.
+- Added unit coverage for async shutdown cancellation and processor active-task
+  requeue, plus a Redis-backed integration test that verifies an in-flight task
+  returns from active to pending on async server shutdown.
+- Updated worker lifecycle docs with the async shutdown requeue behavior.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L486-L506
+- TODO: Add background async lease extension, handler panic capture, and
+  timeout/deadline cancellation once separate task execution handles are
+  modeled.
+
 - Added a Redis-backed async worker integration test that wires
   `AsyncRedisBroker`, `AsyncProcessor`, and `AsyncServer` together, enqueues a
   task, completes it through the async server loop, and stops through a Tokio

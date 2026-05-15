@@ -24,7 +24,7 @@ pub use archive::{ArchiveBroker, ArchiveError};
 pub use async_processor::{
     AsyncArchiveBroker, AsyncCompleteBroker, AsyncDequeueBroker, AsyncErrorHandler,
     AsyncExtendLeaseBeforeProcess, AsyncForwardBroker, AsyncHandler, AsyncLeaseBroker,
-    AsyncLeaseExtender, AsyncProcessor, AsyncRecoverBroker, AsyncRetryBroker,
+    AsyncLeaseExtender, AsyncProcessor, AsyncRecoverBroker, AsyncRequeueBroker, AsyncRetryBroker,
     NoopAsyncLeaseExtender,
 };
 pub use async_server::{

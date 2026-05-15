@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use asynq_rs::{
-    ArchiveBroker, AsyncProcessor, AsyncRedisBroker, AsyncRedisConnectionExecutor, AsyncServer,
-    BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, ErrorHandler,
+    ArchiveBroker, AsyncHandler, AsyncProcessor, AsyncRedisBroker, AsyncRedisConnectionExecutor,
+    AsyncServer, BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, ErrorHandler,
     ExtendLeaseBeforeProcess, ForwardBroker, HandlerError, LeaseBroker, Processor, ProcessorRun,
     RecoverBroker, RedisBroker, RedisConnectionExecutor, RedisScript, RedisScriptResult,
     RequeueBroker, RetryBroker, Server, ShutdownSignal, Sleeper, Task, TaskMessage, TaskOption,
@@ -14,7 +14,7 @@ use testcontainers_modules::{
     redis::{REDIS_PORT, Redis},
     testcontainers::{Container, runners::SyncRunner},
 };
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 const REDIS_URL_ENV: &str = "ASYNQ_RS_REDIS_URL";
 
@@ -1118,6 +1118,83 @@ async fn async_server_with_redis_processor_completes_task_and_stops_inner(
         .zscore(fixture.completed_key(), "task-id")
         .unwrap();
     assert!(completed_score > 0.0);
+}
+
+#[test]
+fn async_server_shutdown_requeues_in_flight_task() {
+    let Some(mut fixture) = RedisFixture::new("async-server-requeue") else {
+        return;
+    };
+    tokio::runtime::Runtime::new().unwrap().block_on(
+        async_server_shutdown_requeues_in_flight_task_inner(&mut fixture),
+    );
+}
+
+async fn async_server_shutdown_requeues_in_flight_task_inner(fixture: &mut RedisFixture) {
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:shutdown",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("shutdown-id"),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let broker = fixture.async_broker().await;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (started_tx, started_rx) = oneshot::channel();
+    let processor = AsyncProcessor::new(
+        broker,
+        BlockingAsyncHandler {
+            started_tx: Some(started_tx),
+        },
+    );
+    let mut server = AsyncServer::new(processor, [fixture.queue().to_owned()]).unwrap();
+    let handle = tokio::spawn(async move { server.run_until_stopped(shutdown_rx).await });
+
+    started_rx.await.unwrap();
+    shutdown_tx.send(true).unwrap();
+    let summary = tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(summary.processed(), 0);
+    assert_eq!(summary.completed(), 0);
+    let stored: HashMap<String, Vec<u8>> = fixture
+        .connection
+        .hgetall(fixture.task_key("shutdown-id"))
+        .unwrap();
+    assert_eq!(string_field(&stored, "state"), "pending");
+    let active_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.active_key(), 0, -1)
+        .unwrap();
+    assert!(active_ids.is_empty());
+    let pending_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.pending_key(), 0, -1)
+        .unwrap();
+    assert_eq!(pending_ids, ["shutdown-id"]);
+}
+
+struct BlockingAsyncHandler {
+    started_tx: Option<oneshot::Sender<()>>,
+}
+
+#[async_trait::async_trait]
+impl AsyncHandler for BlockingAsyncHandler {
+    async fn process_task(&mut self, task: &Task) -> Result<(), HandlerError> {
+        assert_eq!(task.type_name(), "email:shutdown");
+        if let Some(sender) = self.started_tx.take() {
+            sender.send(()).unwrap();
+        }
+        std::future::pending::<()>().await;
+        Ok(())
+    }
 }
 
 #[test]
