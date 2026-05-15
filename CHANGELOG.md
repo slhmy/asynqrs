@@ -2,6 +2,14 @@
 
 ## 2026-05-15
 
+- Added a Redis-backed async worker integration test that wires
+  `AsyncRedisBroker`, `AsyncProcessor`, and `AsyncServer` together, enqueues a
+  task, completes it through the async server loop, and stops through a Tokio
+  watch shutdown signal.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L663-L721
+- TODO: Add async worker shutdown requeue and background lease extension once
+  in-flight cancellation semantics are modeled.
+
 - Added a minimal async worker processor with async broker traits, async
   handler/error-handler traits, pre-handler async lease extension, retry,
   archive, complete, idle, and maintenance paths.

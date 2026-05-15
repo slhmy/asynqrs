@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use asynq_rs::{
-    ArchiveBroker, BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, ErrorHandler,
+    ArchiveBroker, AsyncProcessor, AsyncRedisBroker, AsyncRedisConnectionExecutor, AsyncServer,
+    BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, ErrorHandler,
     ExtendLeaseBeforeProcess, ForwardBroker, HandlerError, LeaseBroker, Processor, ProcessorRun,
     RecoverBroker, RedisBroker, RedisConnectionExecutor, RedisScript, RedisScriptResult,
     RequeueBroker, RetryBroker, Server, ShutdownSignal, Sleeper, Task, TaskMessage, TaskOption,
@@ -13,6 +14,7 @@ use testcontainers_modules::{
     redis::{REDIS_PORT, Redis},
     testcontainers::{Container, runners::SyncRunner},
 };
+use tokio::sync::watch;
 
 const REDIS_URL_ENV: &str = "ASYNQ_RS_REDIS_URL";
 
@@ -1061,6 +1063,64 @@ fn server_run_until_stopped_processes_tasks_and_sleeps_when_idle() {
 }
 
 #[test]
+fn async_server_with_redis_processor_completes_task_and_stops() {
+    let Some(mut fixture) = RedisFixture::new("async-server-complete") else {
+        return;
+    };
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(async_server_with_redis_processor_completes_task_and_stops_inner(&mut fixture));
+}
+
+async fn async_server_with_redis_processor_completes_task_and_stops_inner(
+    fixture: &mut RedisFixture,
+) {
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+            TaskOption::retention(Duration::from_secs(300)),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let broker = fixture.async_broker().await;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut shutdown_tx = Some(shutdown_tx);
+    let processor = AsyncProcessor::new(broker, move |task: &Task| {
+        assert_eq!(task.type_name(), "email:welcome");
+        if let Some(sender) = shutdown_tx.take() {
+            sender.send(true).unwrap();
+        }
+        Ok::<(), HandlerError>(())
+    });
+    let mut server = AsyncServer::new(processor, [fixture.queue().to_owned()]).unwrap();
+
+    let summary = server.run_until_stopped(shutdown_rx).await.unwrap();
+
+    assert_eq!(summary.processed(), 1);
+    assert_eq!(summary.completed(), 1);
+    let stored: HashMap<String, Vec<u8>> = fixture
+        .connection
+        .hgetall(fixture.task_key("task-id"))
+        .unwrap();
+    assert_eq!(string_field(&stored, "state"), "completed");
+    let active_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.active_key(), 0, -1)
+        .unwrap();
+    assert!(active_ids.is_empty());
+    let completed_score: f64 = fixture
+        .connection
+        .zscore(fixture.completed_key(), "task-id")
+        .unwrap();
+    assert!(completed_score > 0.0);
+}
+
+#[test]
 fn server_maintenance_forwards_scheduled_task_before_processing() {
     let Some(mut fixture) = RedisFixture::new("server-forward") else {
         return;
@@ -1230,6 +1290,18 @@ impl RedisFixture {
         let connection = redis_client.get_connection().unwrap();
         let executor = RedisConnectionExecutor::new(connection);
         Client::new(RedisBroker::new(executor))
+    }
+
+    async fn async_broker(
+        &self,
+    ) -> AsyncRedisBroker<AsyncRedisConnectionExecutor<redis::aio::MultiplexedConnection>> {
+        let redis_client = redis::Client::open(self.url.as_ref()).unwrap();
+        let connection = redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        let executor = AsyncRedisConnectionExecutor::new(connection);
+        AsyncRedisBroker::new(executor)
     }
 
     fn queue(&self) -> &str {
