@@ -2,6 +2,11 @@
 
 ## 2026-05-15
 
+- Fixed non-failure retry accounting so `RedisRetryPlan` preserves `retried`
+  and skips processed/failed stats when `IsFailure` returns false.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L380-L418
+- No new TODOs.
+
 - Added the first synchronous worker server loop: `Server`, `Sleeper`,
   `SystemSleeper`, `ShutdownSignal`, `WorkerProcessor`, `ServerRunSummary`, and
   `ServerError`.

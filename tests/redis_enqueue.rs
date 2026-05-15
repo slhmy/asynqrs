@@ -848,11 +848,24 @@ fn processor_is_failure_false_retries_without_failed_counters() {
         .zscore(fixture.retry_key(), "task-id")
         .unwrap();
     assert!(retry_score > 0.0);
-    let processed_total: i64 = fixture
+    let stored: HashMap<String, Vec<u8>> = fixture
+        .connection
+        .hgetall(fixture.task_key("task-id"))
+        .unwrap();
+    let retry_msg = decode_msg(stored.get("msg").unwrap());
+    assert_eq!(retry_msg.retried, 0);
+    assert_eq!(retry_msg.error_msg, "transient");
+    assert!(retry_msg.last_failed_at > 0);
+    let processed_total: Option<i64> = fixture
         .connection
         .get(fixture.processed_total_key())
         .unwrap();
-    assert_eq!(processed_total, 1);
+    assert!(processed_total.is_none());
+    let processed_daily_keys: Vec<String> = fixture
+        .connection
+        .keys(fixture.processed_daily_key_pattern())
+        .unwrap();
+    assert!(processed_daily_keys.is_empty());
     let failed_total: Option<i64> = fixture.connection.get(fixture.failed_total_key()).unwrap();
     assert!(failed_total.is_none());
     let failed_daily_keys: Vec<String> = fixture

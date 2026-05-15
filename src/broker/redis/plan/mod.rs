@@ -761,7 +761,9 @@ fn retry_call(
     is_failure: bool,
 ) -> Result<RedisScriptCall, RedisRetryPlanError> {
     let mut retry_message = msg.clone();
-    retry_message.retried = retry_message.retried.saturating_add(1);
+    if is_failure {
+        retry_message.retried = retry_message.retried.saturating_add(1);
+    }
     retry_message.error_msg = error_message.to_owned();
     retry_message.last_failed_at = unix_seconds_retry(now, "last failed time")?;
 
@@ -1471,6 +1473,19 @@ mod tests {
     }
 
     #[test]
+    fn plans_retry_without_failure_counting() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let retry_at = now + Duration::from_secs(60);
+        let msg = active_message(0, "");
+
+        let plan = RedisRetryPlan::from_message(&msg, now, retry_at, "transient", false).unwrap();
+        let call = plan.call();
+
+        assert_retry_message_with_retried(&call.args()[1], &msg, "transient", 1_700_000_000, 0);
+        assert_eq!(call.args()[4], RedisArg::String("0".to_owned()));
+    }
+
+    #[test]
     fn validates_retry_inputs() {
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let mut msg = active_message(0, "");
@@ -1715,7 +1730,31 @@ mod tests {
         error_message: &str,
         last_failed_at: i64,
     ) {
-        assert_failure_message(arg, original, error_message, last_failed_at);
+        assert_retry_message_with_retried(
+            arg,
+            original,
+            error_message,
+            last_failed_at,
+            original.retried + 1,
+        );
+    }
+
+    fn assert_retry_message_with_retried(
+        arg: &RedisArg,
+        original: &TaskMessage,
+        error_message: &str,
+        last_failed_at: i64,
+        retried: i32,
+    ) {
+        let RedisArg::Bytes(data) = arg else {
+            panic!("expected encoded message bytes, got {arg:?}");
+        };
+        let decoded = TaskMessage::decode_from_slice(data).unwrap();
+        let mut expected = original.clone();
+        expected.retried = retried;
+        expected.error_msg = error_message.to_owned();
+        expected.last_failed_at = last_failed_at;
+        assert_eq!(decoded, expected);
     }
 
     fn assert_failure_message(
