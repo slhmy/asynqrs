@@ -7,11 +7,18 @@
   forward due scheduled/retry tasks and recover expired active-task leases for
   each configured queue, with `ServerRunSummary` tracking forwarded and
   recovered counts.
+- Added a configurable pre-handler lease extension hook with
+  `LeaseExtender`, `NoopLeaseExtender`, and `ExtendLeaseBeforeProcess`.
+- `Processor::run_once` can now extend the lease of a dequeued task before
+  running the handler, and fails fast if lease extension fails.
+- Covered lease extension with processor unit tests and a Redis integration
+  test.
 - Covered maintenance with server unit tests and a Redis integration test where
   a due scheduled task is forwarded and processed in the same server loop.
 - Updated worker lifecycle docs to describe server maintenance behavior.
 - Reference: https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L687-L695
 - Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L861-L900
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381
 - Reference: https://github.com/hibiken/asynq/blob/v0.26.0/recoverer.go
 - TODO: Add upstream-style independent forwarder/recoverer intervals,
   recoverer clock-skew cutoff, worker concurrency, lease extension,

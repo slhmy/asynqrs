@@ -42,8 +42,9 @@ pub use lease::{LeaseBroker, LeaseError, LeaseExtension};
 pub use message::{DecodeTaskMessageError, TaskMessage};
 pub use options::TaskOption;
 pub use processor::{
-    DefaultIsFailure, DefaultRetryDelay, ErrorHandler, Handler, HandlerError, IsFailure,
-    NoopErrorHandler, Processor, ProcessorError, ProcessorRun, RetryDelay,
+    DefaultIsFailure, DefaultRetryDelay, ErrorHandler, ExtendLeaseBeforeProcess, Handler,
+    HandlerError, IsFailure, LeaseExtender, NoopErrorHandler, NoopLeaseExtender, Processor,
+    ProcessorError, ProcessorRun, RetryDelay,
 };
 pub use recover::{RecoverBroker, RecoverError, RecoverResult};
 pub use requeue::{RequeueBroker, RequeueError};

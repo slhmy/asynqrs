@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::{
     ArchiveBroker, CompleteBroker, DequeueBroker, ErrorHandler, ForwardBroker, Handler, IsFailure,
-    Processor, ProcessorError, ProcessorRun, RecoverBroker, RetryBroker, RetryDelay,
+    LeaseExtender, Processor, ProcessorError, ProcessorRun, RecoverBroker, RetryBroker, RetryDelay,
 };
 
 pub const DEFAULT_SERVER_IDLE_SLEEP: Duration = Duration::from_secs(1);
@@ -276,7 +276,7 @@ where
     }
 }
 
-impl<B, H, R, C, I, E> WorkerProcessor for Processor<B, H, R, C, I, E>
+impl<B, H, R, C, I, E, L> WorkerProcessor for Processor<B, H, R, C, I, E, L>
 where
     B: DequeueBroker + CompleteBroker + RetryBroker + ArchiveBroker + ForwardBroker + RecoverBroker,
     H: Handler,
@@ -284,6 +284,7 @@ where
     C: crate::Clock,
     I: IsFailure,
     E: ErrorHandler,
+    L: LeaseExtender<B>,
 {
     fn run_once(&mut self, queues: &[String]) -> Result<ProcessorRun, ProcessorError> {
         Processor::run_once(self, queues)

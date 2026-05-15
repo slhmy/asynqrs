@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use asynq_rs::{
     ArchiveBroker, BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, ErrorHandler,
-    ForwardBroker, HandlerError, LeaseBroker, Processor, ProcessorRun, RecoverBroker, RedisBroker,
-    RedisConnectionExecutor, RedisScript, RedisScriptResult, RequeueBroker, RetryBroker, Server,
-    ShutdownSignal, Sleeper, Task, TaskMessage, TaskOption, TaskState,
+    ExtendLeaseBeforeProcess, ForwardBroker, HandlerError, LeaseBroker, Processor, ProcessorRun,
+    RecoverBroker, RedisBroker, RedisConnectionExecutor, RedisScript, RedisScriptResult,
+    RequeueBroker, RetryBroker, Server, ShutdownSignal, Sleeper, Task, TaskMessage, TaskOption,
+    TaskState,
 };
 use redis::Commands;
 use testcontainers_modules::{
@@ -756,6 +757,66 @@ fn processor_run_once_completes_successful_task() {
         .get(fixture.processed_total_key())
         .unwrap();
     assert_eq!(processed_total, 1);
+}
+
+#[test]
+fn processor_extends_lease_before_processing_when_configured() {
+    let Some(mut fixture) = RedisFixture::new("processor-extend-lease") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+            TaskOption::retention(Duration::from_secs(300)),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let dequeued = client
+        .broker_mut()
+        .dequeue(&[fixture.queue().to_owned()])
+        .unwrap();
+    let original_score: f64 = fixture
+        .connection
+        .zscore(fixture.lease_key(), "task-id")
+        .unwrap();
+    client.broker_mut().requeue(dequeued.message()).unwrap();
+    let broker = client.into_broker();
+    let lease_key = fixture.lease_key();
+    let url = fixture.url.clone();
+    let mut processor = Processor::new(broker, move |_task: &Task| {
+        let mut connection = redis::Client::open(url.as_ref())
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let extended_score: f64 = connection.zscore(&lease_key, "task-id").unwrap();
+        assert!(extended_score >= original_score);
+        Ok(())
+    })
+    .with_lease_extender(ExtendLeaseBeforeProcess);
+
+    let result = processor.run_once(&[fixture.queue().to_owned()]).unwrap();
+
+    assert_eq!(
+        result,
+        ProcessorRun::Completed {
+            task_id: "task-id".to_owned()
+        }
+    );
+    let stored: HashMap<String, Vec<u8>> = fixture
+        .connection
+        .hgetall(fixture.task_key("task-id"))
+        .unwrap();
+    assert_eq!(string_field(&stored, "state"), "completed");
+    let lease_score: Option<f64> = fixture
+        .connection
+        .zscore(fixture.lease_key(), "task-id")
+        .unwrap();
+    assert!(lease_score.is_none());
 }
 
 #[test]

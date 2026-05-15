@@ -4,8 +4,8 @@ use std::time::{Duration, SystemTime};
 use crate::{
     ArchiveBroker, ArchiveError, Clock, CompleteBroker, CompleteError,
     DEFAULT_SERVER_RECOVER_RETRY_DELAY, DequeueBroker, DequeueError, ForwardBroker, ForwardError,
-    RecoverBroker, RecoverError, RetryBroker, RetryError, ServerMaintenanceRun, SystemClock, Task,
-    TaskMessage,
+    LeaseBroker, LeaseError, RecoverBroker, RecoverError, RetryBroker, RetryError,
+    ServerMaintenanceRun, SystemClock, Task, TaskMessage,
 };
 
 /// Processes a single task.
@@ -90,6 +90,29 @@ where
     }
 }
 
+/// Extends or starts lease extension for a dequeued task before handler
+/// execution.
+///
+/// Reference: Asynq v0.26.0 starts a lease extender goroutine around task
+/// processing:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381>.
+///
+/// TODO: Replace this synchronous hook with a background lease extender loop
+/// once worker concurrency/cancellation semantics and a separate broker handle
+/// are modeled.
+pub trait LeaseExtender<B> {
+    fn before_process(&mut self, broker: &mut B, message: &TaskMessage) -> Result<(), LeaseError>;
+}
+
+impl<B, F> LeaseExtender<B> for F
+where
+    F: FnMut(&mut B, &TaskMessage) -> Result<(), LeaseError>,
+{
+    fn before_process(&mut self, broker: &mut B, message: &TaskMessage) -> Result<(), LeaseError> {
+        self(broker, message)
+    }
+}
+
 /// Default exponential retry delay.
 ///
 /// Reference: Asynq v0.26.0 `DefaultRetryDelayFunc` uses the Sidekiq-inspired
@@ -108,6 +131,12 @@ pub struct DefaultIsFailure;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoopErrorHandler;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopLeaseExtender;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExtendLeaseBeforeProcess;
+
 /// Minimal worker-side processor that runs one dequeued task through a handler
 /// and then marks it complete, retry, archive, or done.
 ///
@@ -115,8 +144,9 @@ pub struct NoopErrorHandler;
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381>.
 ///
 /// TODO: Add worker concurrency, task context timeout/deadline handling, lease
-/// extension, requeue-on-shutdown, sync retry, and upstream maintenance
-/// intervals once the full `Server` / `Processor` runtime is modeled.
+/// extender background loop, requeue-on-shutdown, sync retry, and upstream
+/// maintenance intervals once the full `Server` / `Processor` runtime is
+/// modeled.
 #[derive(Debug, Clone)]
 pub struct Processor<
     B,
@@ -125,6 +155,7 @@ pub struct Processor<
     C = SystemClock,
     I = DefaultIsFailure,
     E = NoopErrorHandler,
+    L = NoopLeaseExtender,
 > {
     broker: B,
     handler: H,
@@ -132,6 +163,7 @@ pub struct Processor<
     clock: C,
     is_failure: I,
     error_handler: E,
+    lease_extender: L,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +190,7 @@ pub enum ProcessorError {
     Complete(CompleteError),
     Retry(RetryError),
     Archive(ArchiveError),
+    Lease(LeaseError),
     Forward(ForwardError),
     Recover(RecoverError),
     TimeOverflow(&'static str),
@@ -177,18 +210,19 @@ impl<B, H, R> Processor<B, H, R, SystemClock> {
 
 impl<B, H, R, C> Processor<B, H, R, C> {
     pub fn with_parts(broker: B, handler: H, retry_delay: R, clock: C) -> Self {
-        Self::with_parts_and_hooks(
+        Self::with_parts_hooks_and_lease_extender(
             broker,
             handler,
             retry_delay,
             clock,
             DefaultIsFailure,
             NoopErrorHandler,
+            NoopLeaseExtender,
         )
     }
 }
 
-impl<B, H, R, C, I, E> Processor<B, H, R, C, I, E> {
+impl<B, H, R, C, I, E> Processor<B, H, R, C, I, E, NoopLeaseExtender> {
     pub fn with_parts_and_hooks(
         broker: B,
         handler: H,
@@ -196,6 +230,28 @@ impl<B, H, R, C, I, E> Processor<B, H, R, C, I, E> {
         clock: C,
         is_failure: I,
         error_handler: E,
+    ) -> Processor<B, H, R, C, I, E, NoopLeaseExtender> {
+        Self::with_parts_hooks_and_lease_extender(
+            broker,
+            handler,
+            retry_delay,
+            clock,
+            is_failure,
+            error_handler,
+            NoopLeaseExtender,
+        )
+    }
+}
+
+impl<B, H, R, C, I, E, L> Processor<B, H, R, C, I, E, L> {
+    pub fn with_parts_hooks_and_lease_extender(
+        broker: B,
+        handler: H,
+        retry_delay: R,
+        clock: C,
+        is_failure: I,
+        error_handler: E,
+        lease_extender: L,
     ) -> Self {
         Self {
             broker,
@@ -204,10 +260,11 @@ impl<B, H, R, C, I, E> Processor<B, H, R, C, I, E> {
             clock,
             is_failure,
             error_handler,
+            lease_extender,
         }
     }
 
-    pub fn with_is_failure<I2>(self, is_failure: I2) -> Processor<B, H, R, C, I2, E> {
+    pub fn with_is_failure<I2>(self, is_failure: I2) -> Processor<B, H, R, C, I2, E, L> {
         Processor {
             broker: self.broker,
             handler: self.handler,
@@ -215,10 +272,11 @@ impl<B, H, R, C, I, E> Processor<B, H, R, C, I, E> {
             clock: self.clock,
             is_failure,
             error_handler: self.error_handler,
+            lease_extender: self.lease_extender,
         }
     }
 
-    pub fn with_error_handler<E2>(self, error_handler: E2) -> Processor<B, H, R, C, I, E2> {
+    pub fn with_error_handler<E2>(self, error_handler: E2) -> Processor<B, H, R, C, I, E2, L> {
         Processor {
             broker: self.broker,
             handler: self.handler,
@@ -226,6 +284,19 @@ impl<B, H, R, C, I, E> Processor<B, H, R, C, I, E> {
             clock: self.clock,
             is_failure: self.is_failure,
             error_handler,
+            lease_extender: self.lease_extender,
+        }
+    }
+
+    pub fn with_lease_extender<L2>(self, lease_extender: L2) -> Processor<B, H, R, C, I, E, L2> {
+        Processor {
+            broker: self.broker,
+            handler: self.handler,
+            retry_delay: self.retry_delay,
+            clock: self.clock,
+            is_failure: self.is_failure,
+            error_handler: self.error_handler,
+            lease_extender,
         }
     }
 
@@ -261,12 +332,20 @@ impl<B, H, R, C, I, E> Processor<B, H, R, C, I, E> {
         &mut self.error_handler
     }
 
+    pub fn lease_extender(&self) -> &L {
+        &self.lease_extender
+    }
+
+    pub fn lease_extender_mut(&mut self) -> &mut L {
+        &mut self.lease_extender
+    }
+
     pub fn into_broker(self) -> B {
         self.broker
     }
 }
 
-impl<B, H, R, C, I, E> Processor<B, H, R, C, I, E>
+impl<B, H, R, C, I, E, L> Processor<B, H, R, C, I, E, L>
 where
     B: DequeueBroker + CompleteBroker + RetryBroker + ArchiveBroker,
     H: Handler,
@@ -274,6 +353,7 @@ where
     C: Clock,
     I: IsFailure,
     E: ErrorHandler,
+    L: LeaseExtender<B>,
 {
     pub fn run_once(&mut self, queues: &[String]) -> Result<ProcessorRun, ProcessorError> {
         let dequeued = match self.broker.dequeue(queues) {
@@ -284,6 +364,8 @@ where
 
         let message = dequeued.message().clone();
         let task = task_from_message(&message);
+        self.lease_extender
+            .before_process(&mut self.broker, &message)?;
         match perform(&mut self.handler, &task) {
             Ok(()) => {
                 self.broker.complete(&message)?;
@@ -350,7 +432,7 @@ where
     }
 }
 
-impl<B, H, R, C, I, E> Processor<B, H, R, C, I, E>
+impl<B, H, R, C, I, E, L> Processor<B, H, R, C, I, E, L>
 where
     B: ForwardBroker + RecoverBroker,
     C: Clock,
@@ -425,6 +507,26 @@ impl ErrorHandler for NoopErrorHandler {
     fn handle_error(&mut self, _task: &Task, _error: &HandlerError) {}
 }
 
+impl<B> LeaseExtender<B> for NoopLeaseExtender {
+    fn before_process(
+        &mut self,
+        _broker: &mut B,
+        _message: &TaskMessage,
+    ) -> Result<(), LeaseError> {
+        Ok(())
+    }
+}
+
+impl<B> LeaseExtender<B> for ExtendLeaseBeforeProcess
+where
+    B: LeaseBroker,
+{
+    fn before_process(&mut self, broker: &mut B, message: &TaskMessage) -> Result<(), LeaseError> {
+        broker.extend_lease(&message.queue, &message.id)?;
+        Ok(())
+    }
+}
+
 fn perform<H>(handler: &mut H, task: &Task) -> Result<(), HandlerError>
 where
     H: Handler,
@@ -483,6 +585,7 @@ impl std::fmt::Display for ProcessorError {
             Self::Complete(error) => write!(f, "failed to complete task: {error}"),
             Self::Retry(error) => write!(f, "failed to retry task: {error}"),
             Self::Archive(error) => write!(f, "failed to archive task: {error}"),
+            Self::Lease(error) => write!(f, "failed to extend task lease: {error}"),
             Self::Forward(error) => write!(f, "failed to forward ready tasks: {error}"),
             Self::Recover(error) => write!(f, "failed to recover expired leases: {error}"),
             Self::TimeOverflow(context) => write!(f, "{context} overflowed"),
@@ -497,6 +600,7 @@ impl std::error::Error for ProcessorError {
             Self::Complete(error) => Some(error),
             Self::Retry(error) => Some(error),
             Self::Archive(error) => Some(error),
+            Self::Lease(error) => Some(error),
             Self::Forward(error) => Some(error),
             Self::Recover(error) => Some(error),
             Self::TimeOverflow(_) => None,
@@ -528,6 +632,12 @@ impl From<ArchiveError> for ProcessorError {
     }
 }
 
+impl From<LeaseError> for ProcessorError {
+    fn from(error: LeaseError) -> Self {
+        Self::Lease(error)
+    }
+}
+
 impl From<ForwardError> for ProcessorError {
     fn from(error: ForwardError) -> Self {
         Self::Forward(error)
@@ -543,6 +653,8 @@ impl From<RecoverError> for ProcessorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
     use crate::DequeuedTask;
 
     #[derive(Debug, Default)]
@@ -551,6 +663,8 @@ mod tests {
         completed: Vec<String>,
         retried: Vec<(String, SystemTime, String, bool)>,
         archived: Vec<(String, SystemTime, String, bool)>,
+        lease_extensions: Vec<(String, String)>,
+        extend_lease_error: Option<LeaseError>,
     }
 
     impl DequeueBroker for RecordingBroker {
@@ -599,6 +713,24 @@ mod tests {
                 is_failure,
             ));
             Ok(())
+        }
+    }
+
+    impl LeaseBroker for RecordingBroker {
+        fn extend_lease(
+            &mut self,
+            queue: &str,
+            task_id: &str,
+        ) -> Result<crate::LeaseExtension, LeaseError> {
+            self.lease_extensions
+                .push((queue.to_owned(), task_id.to_owned()));
+            if let Some(error) = self.extend_lease_error.clone() {
+                Err(error)
+            } else {
+                Ok(crate::LeaseExtension::new(
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(60),
+                ))
+            }
         }
     }
 
@@ -657,6 +789,78 @@ mod tests {
             }
         );
         assert_eq!(processor.broker().completed, ["task-id"]);
+        assert!(processor.broker().lease_extensions.is_empty());
+    }
+
+    #[test]
+    fn lease_extender_runs_before_handler_when_configured() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let broker = RecordingBroker {
+            dequeued: vec![Ok(dequeued_message(0, 3))],
+            ..RecordingBroker::default()
+        };
+        let handler_ran = Cell::new(false);
+        let mut processor = Processor::with_parts(
+            broker,
+            |_task: &Task| {
+                handler_ran.set(true);
+                Ok(())
+            },
+            |_retried, _error: &HandlerError, _task: &Task| Duration::from_secs(60),
+            TestClock(now),
+        )
+        .with_lease_extender(ExtendLeaseBeforeProcess);
+
+        let result = processor.run_once(&["critical".to_owned()]).unwrap();
+
+        assert_eq!(
+            result,
+            ProcessorRun::Completed {
+                task_id: "task-id".to_owned()
+            }
+        );
+        assert!(handler_ran.get());
+        assert_eq!(
+            processor.broker().lease_extensions,
+            [("critical".to_owned(), "task-id".to_owned())]
+        );
+        assert_eq!(processor.broker().completed, ["task-id"]);
+    }
+
+    #[test]
+    fn lease_extension_error_stops_processing() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let broker = RecordingBroker {
+            dequeued: vec![Ok(dequeued_message(0, 3))],
+            extend_lease_error: Some(LeaseError::Other("lease update failed".to_owned())),
+            ..RecordingBroker::default()
+        };
+        let handler_ran = Cell::new(false);
+        let mut processor = Processor::with_parts(
+            broker,
+            |_task: &Task| {
+                handler_ran.set(true);
+                Ok(())
+            },
+            |_retried, _error: &HandlerError, _task: &Task| Duration::from_secs(60),
+            TestClock(now),
+        )
+        .with_lease_extender(ExtendLeaseBeforeProcess);
+
+        let error = processor.run_once(&["critical".to_owned()]).unwrap_err();
+
+        assert_eq!(
+            error,
+            ProcessorError::Lease(LeaseError::Other("lease update failed".to_owned()))
+        );
+        assert!(!handler_ran.get());
+        assert_eq!(
+            processor.broker().lease_extensions,
+            [("critical".to_owned(), "task-id".to_owned())]
+        );
+        assert!(processor.broker().completed.is_empty());
+        assert!(processor.broker().retried.is_empty());
+        assert!(processor.broker().archived.is_empty());
     }
 
     #[test]

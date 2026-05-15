@@ -31,6 +31,8 @@ sleep，并由调用方提供 shutdown signal 停止拉取新任务。
   <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go>
 - `LeaseDuration`：
   <https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L46-L52>
+- `processor.go` lease extender / handler flow：
+  <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381>
 - `statsTTL`：
   <https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L54-L60>
 - broker 接口：
@@ -173,8 +175,10 @@ println!(
 `SystemSleeper` 默认使用 `std::thread::sleep`，测试或嵌入式调用可以通过
 `Server::with_sleeper` 注入自定义 sleeper。当前 shutdown 是 graceful
 边界：signal 置位后停止拉取新任务；已经进入 handler 的任务会自然执行完。
-真正的 in-flight cancellation、lease extender、shutdown requeue，以及和
-上游一样独立定时运行的 forwarder/recoverer 间隔还没有建模。
+`Processor` 现在还有一个可配置的 pre-handler lease extension hook，默认是
+no-op；`ExtendLeaseBeforeProcess` 会在 handler 运行前先续约 active task。
+真正的 in-flight cancellation、后台 lease extender loop、shutdown requeue，
+以及和上游一样独立定时运行的 forwarder/recoverer 间隔还没有建模。
 
 ## Dequeue
 
@@ -430,6 +434,8 @@ retry、archive、requeue、forward、recover、lease extension 和 server loop
 - recover 会清理 active/lease，更新失败字段和 processed/failed counters
 - extend lease 会更新已有 active lease 的 score
 - complete 后再次 extend lease 不会创建新的 lease entry
+- processor 可在 handler 前先续约 active task
+- lease extension 失败会阻止 handler 执行
 - server loop 会先执行维护 pass，再持续调用 processor
 - server maintenance 会把到期 scheduled task forward 后在同一轮处理
 - server loop 会处理成功任务、失败 retry 任务，并在 idle poll 后 sleep
