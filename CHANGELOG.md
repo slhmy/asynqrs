@@ -1,5 +1,34 @@
 # CHANGELOG
 
+## 2026-05-15
+
+- Added active-task requeue support: `RequeueBroker`, `RequeueError`,
+  `RedisRequeuePlan`, `RedisBroker::requeue`, and the fixed Asynq v0.26.0
+  `requeue` Lua script.
+- Requeue now mirrors `RDB.Requeue` by removing the task from active and lease,
+  pushing the task id back to pending, and setting task state to `pending`
+  without updating processed/failed counters.
+- Covered requeue behavior with Redis plan/script/broker unit tests and a Redis
+  integration test.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L486-L506
+- TODO: Wire requeue into worker shutdown handling once `Processor` has a
+  long-running server loop and cancellation model.
+
+- Added worker error hooks: `IsFailure`, `DefaultIsFailure`, `ErrorHandler`,
+  and `NoopErrorHandler`.
+- `Processor::run_once` now calls the configured error handler for handler
+  failures and passes the configured `IsFailure` result into retry lifecycle
+  operations, matching Asynq's configurable failure-counting behavior for
+  retries.
+- Covered the hooks with unit tests and a Redis integration test proving a
+  retried task can avoid failed counters when `IsFailure` returns false.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L124-L130
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L277-L287
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L335-L360
+- TODO: Add worker concurrency, task context timeout/deadline handling, lease
+  extension, requeue-on-shutdown, and sync retry once the full `Server` /
+  `Processor` runtime is modeled.
+
 ## 2026-05-14
 
 - Added the first minimal worker processor: `Handler`, `HandlerError`,
@@ -13,8 +42,8 @@
 - Reference: https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L622-L650
 - Reference: https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381
 - TODO: Add worker concurrency, task context timeout/deadline handling, lease
-  extension, requeue-on-shutdown, sync retry, an `IsFailure` predicate, and
-  error-handler hooks once the full `Server` / `Processor` runtime is modeled.
+  extension, requeue-on-shutdown, and sync retry once the full `Server` /
+  `Processor` runtime is modeled.
 
 - Added lease extension: `LeaseBroker`, `LeaseError`, `LeaseExtension`,
   `RedisExtendLeasePlan`, and `RedisBroker::extend_lease`.

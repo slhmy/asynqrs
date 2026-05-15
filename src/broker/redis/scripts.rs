@@ -35,7 +35,7 @@ pub enum RedisScriptCallError {
 }
 
 impl RedisScript {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Enqueue,
         Self::EnqueueUnique,
         Self::Schedule,
@@ -49,6 +49,7 @@ impl RedisScript {
         Self::MarkAsCompleteUnique,
         Self::Retry,
         Self::Archive,
+        Self::Requeue,
         Self::Forward,
         Self::ListLeaseExpired,
     ];
@@ -145,6 +146,13 @@ impl RedisScript {
                 source: ARCHIVE_SOURCE,
                 key_count: 8,
                 arg_count: 6,
+            },
+            Self::Requeue => RedisScriptSpec {
+                script: self,
+                name: "requeue",
+                source: REQUEUE_SOURCE,
+                key_count: 4,
+                arg_count: 1,
             },
             Self::Forward => RedisScriptSpec {
                 script: self,
@@ -575,6 +583,19 @@ end
 return redis.status_reply("OK")
 "#;
 
+// Source: Asynq v0.26.0 `requeueCmd`.
+const REQUEUE_SOURCE: &str = r#"
+if redis.call("LREM", KEYS[1], 0, ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+if redis.call("ZREM", KEYS[2], ARGV[1]) == 0 then
+  return redis.error_reply("NOT FOUND")
+end
+redis.call("RPUSH", KEYS[3], ARGV[1])
+redis.call("HSET", KEYS[4], "state", "pending")
+return redis.status_reply("OK")
+"#;
+
 // Source: Asynq v0.26.0 `forwardCmd`.
 const FORWARD_SOURCE: &str = r#"
 local ids = redis.call("ZRANGEBYSCORE", KEYS[1], "-inf", ARGV[1], "LIMIT", 0, 100)
@@ -616,8 +637,8 @@ mod tests {
 
     use crate::{
         EnqueuePlan, RedisArchivePlan, RedisCompletePlan, RedisEnqueueOperation, RedisEnqueuePlan,
-        RedisExtendLeasePlan, RedisForwardPlan, RedisRecoverPlan, RedisRetryPlan, Task,
-        TaskMessage, TaskOption,
+        RedisExtendLeasePlan, RedisForwardPlan, RedisRecoverPlan, RedisRequeuePlan, RedisRetryPlan,
+        Task, TaskMessage, TaskOption,
     };
 
     #[test]
@@ -641,6 +662,7 @@ mod tests {
             ),
             (RedisScript::Retry, "retry", 8, 6),
             (RedisScript::Archive, "archive", 8, 6),
+            (RedisScript::Requeue, "requeue", 4, 1),
             (RedisScript::Forward, "forward", 3, 2),
             (RedisScript::ListLeaseExpired, "list_lease_expired", 2, 1),
         ];
@@ -670,7 +692,8 @@ mod tests {
                 | RedisScript::MarkAsComplete
                 | RedisScript::MarkAsCompleteUnique
                 | RedisScript::Retry
-                | RedisScript::Archive => {
+                | RedisScript::Archive
+                | RedisScript::Requeue => {
                     assert!(spec.source().contains("status_reply"));
                     assert!(spec.source().contains("NOT FOUND"));
                 }
@@ -699,6 +722,7 @@ mod tests {
         assert_eq!(RedisScript::Done.result_for_code(1), None);
         assert_eq!(RedisScript::Retry.result_for_code(1), None);
         assert_eq!(RedisScript::Archive.result_for_code(1), None);
+        assert_eq!(RedisScript::Requeue.result_for_code(1), None);
         assert_eq!(RedisScript::Forward.result_for_code(1), None);
         assert_eq!(RedisScript::ListLeaseExpired.result_for_code(1), None);
     }
@@ -861,6 +885,15 @@ mod tests {
         let redis_plan =
             RedisArchivePlan::from_message(&message, now, now, "max retry exhausted", true)
                 .unwrap();
+
+        redis_plan.call().validate().unwrap();
+    }
+
+    #[test]
+    fn redis_requeue_plan_matches_script_shape() {
+        let message = active_message(0, "");
+
+        let redis_plan = RedisRequeuePlan::from_message(&message).unwrap();
 
         redis_plan.call().validate().unwrap();
     }

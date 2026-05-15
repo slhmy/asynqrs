@@ -64,6 +64,15 @@ pub struct RedisArchivePlan {
     call: RedisScriptCall,
 }
 
+/// Redis command intent for returning an active task back to pending.
+///
+/// Reference: Asynq v0.26.0 `RDB.Requeue`:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L486-L506>.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedisRequeuePlan {
+    call: RedisScriptCall,
+}
+
 /// Redis command intent for moving due scheduled/retry tasks to processable
 /// queues.
 ///
@@ -134,6 +143,7 @@ pub enum RedisScript {
     MarkAsCompleteUnique,
     Retry,
     Archive,
+    Requeue,
     Forward,
     ListLeaseExpired,
 }
@@ -181,6 +191,12 @@ pub enum RedisArchivePlanError {
     EmptyQueueName,
     EmptyTaskId,
     TimeOverflow(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedisRequeuePlanError {
+    EmptyQueueName,
+    EmptyTaskId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,6 +355,34 @@ impl RedisArchivePlan {
 
         Ok(Self {
             call: archive_call(message, now, archived_at, error_message, is_failure)?,
+        })
+    }
+
+    pub fn call(&self) -> &RedisScriptCall {
+        &self.call
+    }
+}
+
+impl RedisRequeuePlan {
+    pub fn from_message(message: &TaskMessage) -> Result<Self, RedisRequeuePlanError> {
+        if message.queue.trim().is_empty() {
+            return Err(RedisRequeuePlanError::EmptyQueueName);
+        }
+        if message.id.trim().is_empty() {
+            return Err(RedisRequeuePlanError::EmptyTaskId);
+        }
+
+        Ok(Self {
+            call: RedisScriptCall::new(
+                RedisScript::Requeue,
+                vec![
+                    keys::active_key(&message.queue),
+                    keys::lease_key(&message.queue),
+                    keys::pending_key(&message.queue),
+                    task_key(message),
+                ],
+                vec![RedisArg::String(message.id.clone())],
+            ),
         })
     }
 
@@ -1004,6 +1048,17 @@ impl std::fmt::Display for RedisArchivePlanError {
 
 impl std::error::Error for RedisArchivePlanError {}
 
+impl std::fmt::Display for RedisRequeuePlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
+            Self::EmptyTaskId => f.write_str("task id must contain one or more characters"),
+        }
+    }
+}
+
+impl std::error::Error for RedisRequeuePlanError {}
+
 impl std::fmt::Display for RedisForwardPlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1483,6 +1538,44 @@ mod tests {
             RedisArchivePlan::from_message(&msg, now, now, "max retry exhausted", true)
                 .unwrap_err(),
             RedisArchivePlanError::EmptyTaskId
+        );
+    }
+
+    #[test]
+    fn plans_requeue_script_for_active_task() {
+        let msg = active_message(0, "");
+
+        let plan = RedisRequeuePlan::from_message(&msg).unwrap();
+        let call = plan.call();
+
+        assert_eq!(call.script(), RedisScript::Requeue);
+        assert_eq!(
+            call.keys(),
+            &[
+                "asynq:{critical}:active".to_owned(),
+                "asynq:{critical}:lease".to_owned(),
+                "asynq:{critical}:pending".to_owned(),
+                "asynq:{critical}:t:task-id".to_owned(),
+            ]
+        );
+        assert_eq!(call.args(), &[RedisArg::String("task-id".to_owned())]);
+    }
+
+    #[test]
+    fn validates_requeue_inputs() {
+        let mut msg = active_message(0, "");
+
+        msg.queue = " ".to_owned();
+        assert_eq!(
+            RedisRequeuePlan::from_message(&msg).unwrap_err(),
+            RedisRequeuePlanError::EmptyQueueName
+        );
+
+        msg.queue = "critical".to_owned();
+        msg.id = " ".to_owned();
+        assert_eq!(
+            RedisRequeuePlan::from_message(&msg).unwrap_err(),
+            RedisRequeuePlanError::EmptyTaskId
         );
     }
 

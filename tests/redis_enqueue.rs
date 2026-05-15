@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use asynq_rs::{
-    ArchiveBroker, BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, ForwardBroker,
-    HandlerError, LeaseBroker, Processor, ProcessorRun, RecoverBroker, RedisBroker,
-    RedisConnectionExecutor, RedisScript, RedisScriptResult, RetryBroker, Task, TaskMessage,
-    TaskOption, TaskState,
+    ArchiveBroker, BrokerError, Client, ClientError, CompleteBroker, DequeueBroker, ErrorHandler,
+    ForwardBroker, HandlerError, LeaseBroker, Processor, ProcessorRun, RecoverBroker, RedisBroker,
+    RedisConnectionExecutor, RedisScript, RedisScriptResult, RequeueBroker, RetryBroker, Task,
+    TaskMessage, TaskOption, TaskState,
 };
 use redis::Commands;
 use testcontainers_modules::{
@@ -313,6 +313,57 @@ fn retry_moves_active_task_to_retry_set_and_records_failure_stats() {
         .unwrap();
     assert_eq!(processed_daily_keys.len(), 1);
     assert_eq!(failed_daily_keys.len(), 1);
+}
+
+#[test]
+fn requeue_moves_active_task_back_to_pending_without_stats() {
+    let Some(mut fixture) = RedisFixture::new("requeue") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let dequeued = client
+        .broker_mut()
+        .dequeue(&[fixture.queue().to_owned()])
+        .unwrap();
+    client.broker_mut().requeue(dequeued.message()).unwrap();
+
+    let active_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.active_key(), 0, -1)
+        .unwrap();
+    assert!(active_ids.is_empty());
+    let lease_score: Option<f64> = fixture
+        .connection
+        .zscore(fixture.lease_key(), "task-id")
+        .unwrap();
+    assert!(lease_score.is_none());
+    let pending_ids: Vec<String> = fixture
+        .connection
+        .lrange(fixture.pending_key(), 0, -1)
+        .unwrap();
+    assert_eq!(pending_ids, ["task-id"]);
+    let stored: HashMap<String, Vec<u8>> = fixture
+        .connection
+        .hgetall(fixture.task_key("task-id"))
+        .unwrap();
+    assert_eq!(string_field(&stored, "state"), "pending");
+    let processed_total: Option<i64> = fixture
+        .connection
+        .get(fixture.processed_total_key())
+        .unwrap();
+    let failed_total: Option<i64> = fixture.connection.get(fixture.failed_total_key()).unwrap();
+    assert!(processed_total.is_none());
+    assert!(failed_total.is_none());
 }
 
 #[test]
@@ -760,6 +811,58 @@ fn processor_run_once_retries_handler_failure() {
 }
 
 #[test]
+fn processor_is_failure_false_retries_without_failed_counters() {
+    let Some(mut fixture) = RedisFixture::new("processor-is-failure") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:welcome",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("task-id"),
+            TaskOption::max_retry(3),
+        ],
+    );
+
+    client.enqueue(&task).unwrap();
+    let broker = client.into_broker();
+    let mut processor = Processor::with_retry_delay(
+        broker,
+        |_task: &Task| Err(HandlerError::failed("transient")),
+        |_retried, _error: &HandlerError, _task: &Task| Duration::from_secs(60),
+    )
+    .with_is_failure(|error: &HandlerError| error.to_string() != "transient")
+    .with_error_handler(RecordingErrorHandler::default());
+
+    let result = processor.run_once(&[fixture.queue().to_owned()]).unwrap();
+
+    assert!(matches!(result, ProcessorRun::Retried { .. }));
+    assert_eq!(
+        processor.error_handler().errors,
+        [("email:welcome".to_owned(), "transient".to_owned())]
+    );
+    let retry_score: f64 = fixture
+        .connection
+        .zscore(fixture.retry_key(), "task-id")
+        .unwrap();
+    assert!(retry_score > 0.0);
+    let processed_total: i64 = fixture
+        .connection
+        .get(fixture.processed_total_key())
+        .unwrap();
+    assert_eq!(processed_total, 1);
+    let failed_total: Option<i64> = fixture.connection.get(fixture.failed_total_key()).unwrap();
+    assert!(failed_total.is_none());
+    let failed_daily_keys: Vec<String> = fixture
+        .connection
+        .keys(fixture.failed_daily_key_pattern())
+        .unwrap();
+    assert!(failed_daily_keys.is_empty());
+}
+
+#[test]
 fn processor_revoke_deletes_retained_task_without_completed_set() {
     let Some(mut fixture) = RedisFixture::new("processor-revoke") else {
         return;
@@ -1046,4 +1149,16 @@ fn redis_url() -> Option<(String, Option<Container<Redis>>)> {
         }
     };
     Some((format!("redis://{host}:{port}"), Some(container)))
+}
+
+#[derive(Debug, Default)]
+struct RecordingErrorHandler {
+    errors: Vec<(String, String)>,
+}
+
+impl ErrorHandler for RecordingErrorHandler {
+    fn handle_error(&mut self, task: &Task, error: &HandlerError) {
+        self.errors
+            .push((task.type_name().to_owned(), error.to_string()));
+    }
 }

@@ -12,6 +12,7 @@ mod options;
 pub mod pb;
 mod processor;
 mod recover;
+mod requeue;
 mod retry;
 mod state;
 mod task;
@@ -24,9 +25,9 @@ pub use broker::redis::{
     RedisConnectionProviderExecutor, RedisDequeueCall, RedisDequeuePlan, RedisDequeuePlanError,
     RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError, RedisExecutor,
     RedisExecutorError, RedisExtendLeasePlan, RedisExtendLeasePlanError, RedisForwardPlan,
-    RedisForwardPlanError, RedisRecoverPlan, RedisRecoverPlanError, RedisRetryPlan,
-    RedisRetryPlanError, RedisScript, RedisScriptCall, RedisScriptCallError, RedisScriptResult,
-    RedisScriptSpec, STATS_TTL,
+    RedisForwardPlanError, RedisRecoverPlan, RedisRecoverPlanError, RedisRequeuePlan,
+    RedisRequeuePlanError, RedisRetryPlan, RedisRetryPlanError, RedisScript, RedisScriptCall,
+    RedisScriptCallError, RedisScriptResult, RedisScriptSpec, STATS_TTL,
 };
 pub use client::{
     Broker, BrokerError, Client, ClientError, Clock, EnqueueResult, SystemClock, TaskIdGenerator,
@@ -40,9 +41,11 @@ pub use lease::{LeaseBroker, LeaseError, LeaseExtension};
 pub use message::{DecodeTaskMessageError, TaskMessage};
 pub use options::TaskOption;
 pub use processor::{
-    DefaultRetryDelay, Handler, HandlerError, Processor, ProcessorError, ProcessorRun, RetryDelay,
+    DefaultIsFailure, DefaultRetryDelay, ErrorHandler, Handler, HandlerError, IsFailure,
+    NoopErrorHandler, Processor, ProcessorError, ProcessorRun, RetryDelay,
 };
 pub use recover::{RecoverBroker, RecoverError, RecoverResult};
+pub use requeue::{RequeueBroker, RequeueError};
 pub use retry::{RetryBroker, RetryError};
 pub use state::{ParseTaskStateError, TaskState};
 pub use task::Task;

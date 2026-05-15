@@ -53,6 +53,41 @@ where
     }
 }
 
+/// Determines whether a handler error counts as a failure in task statistics.
+///
+/// Reference: Asynq v0.26.0 `Config.IsFailure`:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L124-L130>.
+pub trait IsFailure {
+    fn is_failure(&mut self, error: &HandlerError) -> bool;
+}
+
+impl<F> IsFailure for F
+where
+    F: FnMut(&HandlerError) -> bool,
+{
+    fn is_failure(&mut self, error: &HandlerError) -> bool {
+        self(error)
+    }
+}
+
+/// Handles errors returned by task handlers.
+///
+/// Reference: Asynq v0.26.0 `ErrorHandler` and processor error hook:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L277-L287>,
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L335-L338>.
+pub trait ErrorHandler {
+    fn handle_error(&mut self, task: &Task, error: &HandlerError);
+}
+
+impl<F> ErrorHandler for F
+where
+    F: FnMut(&Task, &HandlerError),
+{
+    fn handle_error(&mut self, task: &Task, error: &HandlerError) {
+        self(task, error);
+    }
+}
+
 /// Default exponential retry delay.
 ///
 /// Reference: Asynq v0.26.0 `DefaultRetryDelayFunc` uses the Sidekiq-inspired
@@ -61,6 +96,16 @@ where
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultRetryDelay;
 
+/// Default failure predicate: every handler error counts as a failure.
+///
+/// Reference: Asynq v0.26.0 `defaultIsFailureFunc`:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L407>.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultIsFailure;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopErrorHandler;
+
 /// Minimal worker-side processor that runs one dequeued task through a handler
 /// and then marks it complete, retry, archive, or done.
 ///
@@ -68,14 +113,23 @@ pub struct DefaultRetryDelay;
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381>.
 ///
 /// TODO: Add worker concurrency, task context timeout/deadline handling, lease
-/// extension, requeue-on-shutdown, sync retry, an `IsFailure` predicate, and
-/// error-handler hooks once the full `Server` / `Processor` runtime is modeled.
+/// extension, requeue-on-shutdown, and sync retry once the full `Server` /
+/// `Processor` runtime is modeled.
 #[derive(Debug, Clone)]
-pub struct Processor<B, H, R = DefaultRetryDelay, C = SystemClock> {
+pub struct Processor<
+    B,
+    H,
+    R = DefaultRetryDelay,
+    C = SystemClock,
+    I = DefaultIsFailure,
+    E = NoopErrorHandler,
+> {
     broker: B,
     handler: H,
     retry_delay: R,
     clock: C,
+    is_failure: I,
+    error_handler: E,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,11 +173,55 @@ impl<B, H, R> Processor<B, H, R, SystemClock> {
 
 impl<B, H, R, C> Processor<B, H, R, C> {
     pub fn with_parts(broker: B, handler: H, retry_delay: R, clock: C) -> Self {
+        Self::with_parts_and_hooks(
+            broker,
+            handler,
+            retry_delay,
+            clock,
+            DefaultIsFailure,
+            NoopErrorHandler,
+        )
+    }
+}
+
+impl<B, H, R, C, I, E> Processor<B, H, R, C, I, E> {
+    pub fn with_parts_and_hooks(
+        broker: B,
+        handler: H,
+        retry_delay: R,
+        clock: C,
+        is_failure: I,
+        error_handler: E,
+    ) -> Self {
         Self {
             broker,
             handler,
             retry_delay,
             clock,
+            is_failure,
+            error_handler,
+        }
+    }
+
+    pub fn with_is_failure<I2>(self, is_failure: I2) -> Processor<B, H, R, C, I2, E> {
+        Processor {
+            broker: self.broker,
+            handler: self.handler,
+            retry_delay: self.retry_delay,
+            clock: self.clock,
+            is_failure,
+            error_handler: self.error_handler,
+        }
+    }
+
+    pub fn with_error_handler<E2>(self, error_handler: E2) -> Processor<B, H, R, C, I, E2> {
+        Processor {
+            broker: self.broker,
+            handler: self.handler,
+            retry_delay: self.retry_delay,
+            clock: self.clock,
+            is_failure: self.is_failure,
+            error_handler,
         }
     }
 
@@ -143,17 +241,35 @@ impl<B, H, R, C> Processor<B, H, R, C> {
         &mut self.handler
     }
 
+    pub fn is_failure(&self) -> &I {
+        &self.is_failure
+    }
+
+    pub fn is_failure_mut(&mut self) -> &mut I {
+        &mut self.is_failure
+    }
+
+    pub fn error_handler(&self) -> &E {
+        &self.error_handler
+    }
+
+    pub fn error_handler_mut(&mut self) -> &mut E {
+        &mut self.error_handler
+    }
+
     pub fn into_broker(self) -> B {
         self.broker
     }
 }
 
-impl<B, H, R, C> Processor<B, H, R, C>
+impl<B, H, R, C, I, E> Processor<B, H, R, C, I, E>
 where
     B: DequeueBroker + CompleteBroker + RetryBroker + ArchiveBroker,
     H: Handler,
     R: RetryDelay,
     C: Clock,
+    I: IsFailure,
+    E: ErrorHandler,
 {
     pub fn run_once(&mut self, queues: &[String]) -> Result<ProcessorRun, ProcessorError> {
         let dequeued = match self.broker.dequeue(queues) {
@@ -171,44 +287,50 @@ where
                     task_id: message.id,
                 })
             }
-            Err(HandlerError::RevokeTask(_)) => {
-                let mut revoked = message.clone();
-                revoked.retention = 0;
-                self.broker.complete(&revoked)?;
-                Ok(ProcessorRun::Revoked {
-                    task_id: message.id,
-                })
-            }
-            Err(error @ HandlerError::SkipRetry(_)) => {
-                let error_message = error.to_string();
-                self.broker
-                    .archive(&message, self.clock.now(), &error_message, true)?;
-                Ok(ProcessorRun::Archived {
-                    task_id: message.id,
-                })
-            }
-            Err(error) if message.retried >= message.retry => {
-                let error_message = error.to_string();
-                self.broker
-                    .archive(&message, self.clock.now(), &error_message, true)?;
-                Ok(ProcessorRun::Archived {
-                    task_id: message.id,
-                })
-            }
             Err(error) => {
-                let delay = self.retry_delay.retry_delay(message.retried, &error, &task);
-                let retry_at = self
-                    .clock
-                    .now()
-                    .checked_add(delay)
-                    .ok_or(ProcessorError::TimeOverflow("retry time"))?;
-                let error_message = error.to_string();
-                self.broker
-                    .retry(&message, retry_at, &error_message, true)?;
-                Ok(ProcessorRun::Retried {
-                    task_id: message.id,
-                    retry_at,
-                })
+                self.error_handler.handle_error(&task, &error);
+                match error {
+                    HandlerError::RevokeTask(_) => {
+                        let mut revoked = message.clone();
+                        revoked.retention = 0;
+                        self.broker.complete(&revoked)?;
+                        Ok(ProcessorRun::Revoked {
+                            task_id: message.id,
+                        })
+                    }
+                    error @ HandlerError::SkipRetry(_) => {
+                        let error_message = error.to_string();
+                        self.broker
+                            .archive(&message, self.clock.now(), &error_message, true)?;
+                        Ok(ProcessorRun::Archived {
+                            task_id: message.id,
+                        })
+                    }
+                    error if message.retried >= message.retry => {
+                        let error_message = error.to_string();
+                        self.broker
+                            .archive(&message, self.clock.now(), &error_message, true)?;
+                        Ok(ProcessorRun::Archived {
+                            task_id: message.id,
+                        })
+                    }
+                    error => {
+                        let delay = self.retry_delay.retry_delay(message.retried, &error, &task);
+                        let retry_at = self
+                            .clock
+                            .now()
+                            .checked_add(delay)
+                            .ok_or(ProcessorError::TimeOverflow("retry time"))?;
+                        let error_message = error.to_string();
+                        let is_failure = self.is_failure.is_failure(&error);
+                        self.broker
+                            .retry(&message, retry_at, &error_message, is_failure)?;
+                        Ok(ProcessorRun::Retried {
+                            task_id: message.id,
+                            retry_at,
+                        })
+                    }
+                }
             }
         }
     }
@@ -240,6 +362,16 @@ impl RetryDelay for DefaultRetryDelay {
     fn retry_delay(&mut self, retried: i32, _error: &HandlerError, _task: &Task) -> Duration {
         Self::delay_for_retried_count(retried)
     }
+}
+
+impl IsFailure for DefaultIsFailure {
+    fn is_failure(&mut self, _error: &HandlerError) -> bool {
+        true
+    }
+}
+
+impl ErrorHandler for NoopErrorHandler {
+    fn handle_error(&mut self, _task: &Task, _error: &HandlerError) {}
 }
 
 fn perform<H>(handler: &mut H, task: &Task) -> Result<(), HandlerError>
@@ -500,6 +632,93 @@ mod tests {
     }
 
     #[test]
+    fn custom_is_failure_controls_retry_failure_flag_and_error_handler_runs() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let broker = RecordingBroker {
+            dequeued: vec![Ok(dequeued_message(1, 3))],
+            ..RecordingBroker::default()
+        };
+        let mut processor = Processor::with_parts(
+            broker,
+            |_task: &Task| Err(HandlerError::failed("transient")),
+            |_retried, _error: &HandlerError, _task: &Task| Duration::from_secs(45),
+            TestClock(now),
+        )
+        .with_is_failure(|error: &HandlerError| error.to_string() != "transient")
+        .with_error_handler(VecErrorHandler::default());
+
+        let result = processor.run_once(&["critical".to_owned()]).unwrap();
+
+        assert_eq!(
+            result,
+            ProcessorRun::Retried {
+                task_id: "task-id".to_owned(),
+                retry_at: now + Duration::from_secs(45),
+            }
+        );
+        assert_eq!(
+            processor.broker().retried,
+            [(
+                "task-id".to_owned(),
+                now + Duration::from_secs(45),
+                "transient".to_owned(),
+                false
+            )]
+        );
+        assert_eq!(
+            processor.error_handler().errors,
+            [("email:welcome".to_owned(), "transient".to_owned())]
+        );
+    }
+
+    #[test]
+    fn error_handler_runs_before_archive_and_revoke_paths() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let broker = RecordingBroker {
+            dequeued: vec![Ok(dequeued_message(3, 3)), Ok(dequeued_message(0, 3))],
+            ..RecordingBroker::default()
+        };
+        let mut attempts = 0;
+        let mut processor = Processor::with_parts(
+            broker,
+            move |_task: &Task| {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(HandlerError::failed("exhausted"))
+                } else {
+                    Err(HandlerError::revoke_task("revoke"))
+                }
+            },
+            |_retried, _error: &HandlerError, _task: &Task| Duration::from_secs(60),
+            TestClock(now),
+        )
+        .with_error_handler(VecErrorHandler::default());
+
+        let first = processor.run_once(&["critical".to_owned()]).unwrap();
+        let second = processor.run_once(&["critical".to_owned()]).unwrap();
+
+        assert_eq!(
+            first,
+            ProcessorRun::Archived {
+                task_id: "task-id".to_owned()
+            }
+        );
+        assert_eq!(
+            second,
+            ProcessorRun::Revoked {
+                task_id: "task-id".to_owned()
+            }
+        );
+        assert_eq!(
+            processor.error_handler().errors,
+            [
+                ("email:welcome".to_owned(), "exhausted".to_owned()),
+                ("email:welcome".to_owned(), "revoke".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn archives_when_retry_is_exhausted_or_skipped() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let broker = RecordingBroker {
@@ -631,5 +850,17 @@ mod tests {
 
         assert!(delay >= Duration::from_secs(31));
         assert!(delay <= Duration::from_secs(118));
+    }
+
+    #[derive(Debug, Default)]
+    struct VecErrorHandler {
+        errors: Vec<(String, String)>,
+    }
+
+    impl ErrorHandler for VecErrorHandler {
+        fn handle_error(&mut self, task: &Task, error: &HandlerError) {
+            self.errors
+                .push((task.type_name().to_owned(), error.to_string()));
+        }
     }
 }
