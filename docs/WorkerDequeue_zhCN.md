@@ -211,9 +211,13 @@ hook；`AsyncProcessor` 会通过 `AsyncRequeueBroker::requeue` 把这个 active
 放回 pending。这个路径已经接到 `AsyncRedisBroker`，用于 worker 停止时避免
 正在执行的任务长期留在 active set。
 
-当前 background lease extender、handler panic capture、timeout/deadline
-cancellation，以及和上游一样独立定时运行的 forwarder/recoverer 间隔还没有迁到
-async；这些会沿着 `AsyncServer` / `AsyncRedisBroker` 的边界继续推进。
+`AsyncProcessor` 也会捕获 handler future 在 poll 期间发生的 panic，把 panic
+payload 映射成 `HandlerError::Panic`，然后复用普通 handler failure 的
+retry/archive 路径处理任务。
+
+当前 background lease extender、timeout/deadline cancellation，以及和上游一样
+独立定时运行的 forwarder/recoverer 间隔还没有迁到 async；这些会沿着
+`AsyncServer` / `AsyncRedisBroker` 的边界继续推进。
 
 ## Dequeue
 

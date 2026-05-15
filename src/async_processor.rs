@@ -1,3 +1,5 @@
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::task::Poll;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -195,9 +197,8 @@ where
 /// Reference: Asynq v0.26.0 processor success/failure routing:
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381>.
 ///
-/// TODO: Add task context timeout/deadline handling, panic capture across async
-/// handler execution, background lease extension, and shutdown requeue once the
-/// async runtime semantics are modeled.
+/// TODO: Add task context timeout/deadline handling and background lease
+/// extension once the async runtime semantics are modeled.
 #[derive(Debug, Clone)]
 pub struct AsyncProcessor<
     B,
@@ -349,7 +350,7 @@ where
             self.active_message = None;
             return Err(error.into());
         }
-        let result = match self.handler.process_task(&task).await {
+        let result = match perform(&mut self.handler, &task).await {
             Ok(()) => match self.broker.complete(&message).await {
                 Ok(()) => Ok(ProcessorRun::Completed {
                     task_id: message.id,
@@ -532,6 +533,27 @@ fn task_from_message(message: &TaskMessage) -> Task {
         message.payload.clone(),
         message.headers.clone(),
     )
+}
+
+async fn perform<H>(handler: &mut H, task: &Task) -> Result<(), HandlerError>
+where
+    H: AsyncHandler,
+{
+    let future = handler.process_task(task);
+    tokio::pin!(future);
+    std::future::poll_fn(|cx| {
+        catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))).unwrap_or_else(|panic| {
+            let message = if let Some(message) = panic.downcast_ref::<&str>() {
+                (*message).to_owned()
+            } else if let Some(message) = panic.downcast_ref::<String>() {
+                message.clone()
+            } else {
+                "task handler panicked".to_owned()
+            };
+            Poll::Ready(Err(HandlerError::Panic(message)))
+        })
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -848,6 +870,41 @@ mod tests {
         let result = processor.run_once(&["critical".to_owned()]).await.unwrap();
 
         assert_eq!(result, ProcessorRun::NoProcessableTask);
+    }
+
+    #[tokio::test]
+    async fn handler_panic_is_retried_like_handler_failure() {
+        let broker = RecordingAsyncBroker {
+            dequeued: vec![Ok(dequeued(message("task-id")))],
+            ..RecordingAsyncBroker::default()
+        };
+        let mut processor = AsyncProcessor::with_parts(
+            broker,
+            |_task: &Task| -> Result<(), HandlerError> { panic!("boom") },
+            |_retried, _error: &HandlerError, _task: &Task| Duration::from_secs(60),
+            TestClock(UNIX_EPOCH),
+        );
+
+        let result = processor.run_once(&["critical".to_owned()]).await.unwrap();
+
+        assert_eq!(
+            result,
+            ProcessorRun::Retried {
+                task_id: "task-id".to_owned(),
+                retry_at: UNIX_EPOCH + Duration::from_secs(60),
+            }
+        );
+        assert!(processor.broker().completed.is_empty());
+        assert_eq!(
+            processor.broker().retried,
+            [(
+                "task-id".to_owned(),
+                UNIX_EPOCH + Duration::from_secs(60),
+                "boom".to_owned(),
+                true
+            )]
+        );
+        assert!(processor.broker().archived.is_empty());
     }
 
     #[tokio::test]

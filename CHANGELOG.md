@@ -2,6 +2,16 @@
 
 ## 2026-05-15
 
+- Added async handler panic capture: `AsyncProcessor` now catches panics while
+  polling handler futures, maps them to `HandlerError::Panic`, and routes them
+  through the same retry/archive lifecycle as normal handler failures.
+- Added async processor unit coverage showing a panicking handler is retried
+  without completing or archiving the task.
+- Updated worker lifecycle docs to mention async handler panic routing.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381
+- TODO: Add async task timeout/deadline cancellation and background lease
+  extension once separate task execution handles are modeled.
+
 - Added async worker shutdown requeue: `AsyncServer` now cancels an in-flight
   `run_once` when its Tokio watch shutdown signal fires, then calls the
   processor shutdown hook; `AsyncProcessor` tracks the active task and requeues
@@ -11,9 +21,8 @@
   returns from active to pending on async server shutdown.
 - Updated worker lifecycle docs with the async shutdown requeue behavior.
 - Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L486-L506
-- TODO: Add background async lease extension, handler panic capture, and
-  timeout/deadline cancellation once separate task execution handles are
-  modeled.
+- TODO: Add background async lease extension and timeout/deadline cancellation
+  once separate task execution handles are modeled.
 
 - Added a Redis-backed async worker integration test that wires
   `AsyncRedisBroker`, `AsyncProcessor`, and `AsyncServer` together, enqueues a
@@ -31,9 +40,8 @@
 - Covered async processor success, retry, archive, idle, lease-extension error,
   and maintenance behavior with unit tests.
 - Reference: https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381
-- TODO: Add async handler panic capture, task timeout/deadline cancellation,
-  background lease extension, and shutdown requeue once the runtime semantics
-  are modeled.
+- TODO: Add task timeout/deadline cancellation and background lease extension
+  once the runtime semantics are modeled.
 
 - Added async Redis broker lease extension and active-task requeue methods:
   `AsyncRedisBroker::extend_lease_with_now` and
