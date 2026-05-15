@@ -180,6 +180,27 @@ no-op；`ExtendLeaseBeforeProcess` 会在 handler 运行前先续约 active task
 真正的 in-flight cancellation、后台 lease extender loop、shutdown
 requeue，以及和上游一样独立定时运行的 forwarder/recoverer 间隔还没有建模。
 
+`Server::run_until_stopped_parallel` 提供了第一个同步多 worker 入口。它会为每个
+worker clone 一份 processor 和 sleeper，用共享的 `Arc<AtomicBool>` 作为
+shutdown flag，最后把所有 worker 的 `ServerRunSummary` 合并返回。这个接口
+先把并发边界建起来；它还不是完整的取消模型，不能中断已经进入 handler 的
+任务。
+
+## Async Server
+
+`AsyncServer` 是异步生态重构的第一步。它不替换现有同步 `Server`，而是先提供
+Tokio-native 的 worker loop 边界：
+
+- `AsyncWorkerProcessor`：异步版本的 worker processor trait。
+- `AsyncSleeper` / `TokioSleeper`：异步 idle sleep 抽象。
+- `AsyncServer::run_until_stopped`：用 `tokio::sync::watch` 接收 shutdown
+  signal，循环执行 maintenance、`run_once` 和 idle sleep。
+- `AsyncServer::run_until_stopped_parallel`：用 Tokio task 跑多个 worker，并
+  合并每个 worker 的 `ServerRunSummary`。
+
+当前 Redis executor、broker traits、`Processor` handler 执行、lease extender、
+shutdown requeue 还没有迁到 async；这些会沿着 `AsyncServer` 的边界继续推进。
+
 ## Dequeue
 
 `DequeueBroker` 是 worker 侧的最小 broker trait：

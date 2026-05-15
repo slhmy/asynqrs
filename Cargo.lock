@@ -85,11 +85,13 @@ dependencies = [
 name = "asynq-rs"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "md-5",
  "prost 0.13.5",
  "rand 0.9.4",
  "redis",
  "testcontainers-modules",
+ "tokio",
  "uuid",
 ]
 

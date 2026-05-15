@@ -2,6 +2,32 @@
 
 ## 2026-05-15
 
+- Started the async-runtime refactor by adding Tokio-native server boundaries:
+  `AsyncServer`, `AsyncWorkerProcessor`, `AsyncSleeper`, `TokioSleeper`, and
+  `DEFAULT_ASYNC_SERVER_IDLE_SLEEP`.
+- `AsyncServer::run_until_stopped` now drives a single async worker with a
+  `tokio::sync::watch` shutdown channel, while
+  `AsyncServer::run_until_stopped_parallel` spawns multiple Tokio tasks and
+  merges their `ServerRunSummary` values.
+- Kept the existing synchronous `Server` API intact while async Redis broker
+  and async `Processor` migration remain pending.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L663-L721
+- TODO: Port Redis execution, broker lifecycle traits, handler execution,
+  lease extender, shutdown requeue, and maintenance intervals onto the async
+  runtime.
+
+- Added a first synchronous multi-worker server runner:
+  `Server::run_until_stopped_parallel`.
+- The parallel runner clones the processor/sleeper per worker, shares an
+  `Arc<AtomicBool>` shutdown flag, joins worker threads, and merges
+  `ServerRunSummary` values from each worker.
+- Covered the runner with a unit test that processes two tasks across two
+  worker threads and merges the completed counts.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L663-L721
+- TODO: Add true in-flight cancellation, shutdown requeue, background lease
+  extender loops, and richer worker lifecycle coordination once the runtime
+  model is expanded beyond synchronous thread workers.
+
 - Added a synchronous server maintenance pass before each worker poll.
 - `WorkerProcessor::run_maintenance` and `Processor::run_maintenance` now
   forward due scheduled/retry tasks and recover expired active-task leases for

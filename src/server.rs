@@ -1,3 +1,7 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use crate::{
@@ -73,6 +77,8 @@ pub struct ServerMaintenanceRun {
 pub enum ServerError {
     EmptyQueueList,
     EmptyQueueName,
+    EmptyWorkerCount,
+    WorkerThreadPanicked,
     Processor(ProcessorError),
 }
 
@@ -135,6 +141,34 @@ impl<P, S> Server<P, S> {
     }
 }
 
+impl<P, S> Server<P, S> {
+    fn run_loop<T>(
+        processor: &mut P,
+        queues: &[String],
+        sleeper: &mut S,
+        idle_sleep: Duration,
+        shutdown: &mut T,
+    ) -> Result<ServerRunSummary, ServerError>
+    where
+        P: WorkerProcessor,
+        S: Sleeper,
+        T: ShutdownSignal,
+    {
+        let mut summary = ServerRunSummary::default();
+        while !shutdown.should_stop() {
+            summary.record_maintenance(processor.run_maintenance(queues)?);
+            match processor.run_once(queues)? {
+                ProcessorRun::NoProcessableTask => {
+                    summary.idle_polls += 1;
+                    sleeper.sleep(idle_sleep);
+                }
+                result => summary.record(result),
+            }
+        }
+        Ok(summary)
+    }
+}
+
 impl<P, S> Server<P, S>
 where
     P: WorkerProcessor,
@@ -147,16 +181,56 @@ where
     where
         T: ShutdownSignal,
     {
-        let mut summary = ServerRunSummary::default();
-        while !shutdown.should_stop() {
-            summary.record_maintenance(self.processor.run_maintenance(&self.queues)?);
-            match self.processor.run_once(&self.queues)? {
-                ProcessorRun::NoProcessableTask => {
-                    summary.idle_polls += 1;
-                    self.sleeper.sleep(self.idle_sleep);
+        Self::run_loop(
+            &mut self.processor,
+            &self.queues,
+            &mut self.sleeper,
+            self.idle_sleep,
+            shutdown,
+        )
+    }
+}
+
+impl<P, S> Server<P, S>
+where
+    P: WorkerProcessor + Clone + Send + 'static,
+    S: Sleeper + Clone + Send + 'static,
+{
+    pub fn run_until_stopped_parallel(
+        self,
+        worker_count: usize,
+        shutdown: Arc<AtomicBool>,
+    ) -> Result<ServerRunSummary, ServerError> {
+        if worker_count == 0 {
+            return Err(ServerError::EmptyWorkerCount);
+        }
+
+        let mut handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let mut server = self.clone();
+            let shutdown = Arc::clone(&shutdown);
+            handles.push(std::thread::spawn(move || {
+                let mut summary = ServerRunSummary::default();
+                while !shutdown.load(Ordering::Relaxed) {
+                    summary.record_maintenance(server.processor.run_maintenance(&server.queues)?);
+                    match server.processor.run_once(&server.queues)? {
+                        ProcessorRun::NoProcessableTask => {
+                            summary.idle_polls += 1;
+                            server.sleeper.sleep(server.idle_sleep);
+                        }
+                        result => summary.record(result),
+                    }
                 }
-                result => summary.record(result),
-            }
+                Ok::<ServerRunSummary, ServerError>(summary)
+            }));
+        }
+
+        let mut summary = ServerRunSummary::default();
+        for handle in handles {
+            let worker_summary = handle
+                .join()
+                .map_err(|_| ServerError::WorkerThreadPanicked)??;
+            summary.merge(worker_summary);
         }
         Ok(summary)
     }
@@ -203,7 +277,7 @@ impl ServerRunSummary {
         self.recovered_archived
     }
 
-    fn record(&mut self, result: ProcessorRun) {
+    pub(crate) fn record(&mut self, result: ProcessorRun) {
         self.processed += 1;
         match result {
             ProcessorRun::Completed { .. } => self.completed += 1,
@@ -214,11 +288,28 @@ impl ServerRunSummary {
         }
     }
 
-    fn record_maintenance(&mut self, result: ServerMaintenanceRun) {
+    pub(crate) fn record_idle_poll(&mut self) {
+        self.idle_polls += 1;
+    }
+
+    pub(crate) fn record_maintenance(&mut self, result: ServerMaintenanceRun) {
         self.forwarded_scheduled += result.forwarded_scheduled;
         self.forwarded_retry += result.forwarded_retry;
         self.recovered_retried += result.recovered_retried;
         self.recovered_archived += result.recovered_archived;
+    }
+
+    pub(crate) fn merge(&mut self, other: ServerRunSummary) {
+        self.processed += other.processed;
+        self.completed += other.completed;
+        self.retried += other.retried;
+        self.archived += other.archived;
+        self.revoked += other.revoked;
+        self.idle_polls += other.idle_polls;
+        self.forwarded_scheduled += other.forwarded_scheduled;
+        self.forwarded_retry += other.forwarded_retry;
+        self.recovered_retried += other.recovered_retried;
+        self.recovered_archived += other.recovered_archived;
     }
 }
 
@@ -309,6 +400,8 @@ impl std::fmt::Display for ServerError {
         match self {
             Self::EmptyQueueList => f.write_str("server requires at least one queue"),
             Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
+            Self::EmptyWorkerCount => f.write_str("server requires at least one worker"),
+            Self::WorkerThreadPanicked => f.write_str("server worker thread panicked"),
             Self::Processor(error) => write!(f, "processor failed: {error}"),
         }
     }
@@ -318,7 +411,10 @@ impl std::error::Error for ServerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Processor(error) => Some(error),
-            Self::EmptyQueueList | Self::EmptyQueueName => None,
+            Self::EmptyQueueList
+            | Self::EmptyQueueName
+            | Self::EmptyWorkerCount
+            | Self::WorkerThreadPanicked => None,
         }
     }
 }
@@ -341,6 +437,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::time::{Duration, UNIX_EPOCH};
 
     use crate::DequeueError;
@@ -565,5 +665,77 @@ mod tests {
             server.processor().maintenance_queue_calls,
             [vec!["critical".to_owned()]]
         );
+    }
+
+    #[test]
+    fn runs_multiple_workers_in_parallel_and_merges_summary() {
+        #[derive(Debug, Clone)]
+        struct ParallelProcessor {
+            state: Arc<std::sync::Mutex<Vec<Result<ProcessorRun, ProcessorError>>>>,
+            queue_calls: Arc<std::sync::Mutex<usize>>,
+            maintenance_calls: Arc<std::sync::Mutex<usize>>,
+            shutdown: Arc<AtomicBool>,
+        }
+
+        impl WorkerProcessor for ParallelProcessor {
+            fn run_once(&mut self, queues: &[String]) -> Result<ProcessorRun, ProcessorError> {
+                *self.queue_calls.lock().unwrap() += 1;
+                assert_eq!(queues, ["critical".to_owned()]);
+                let mut state = self.state.lock().unwrap();
+                if state.is_empty() {
+                    self.shutdown.store(true, Ordering::Relaxed);
+                    Ok(ProcessorRun::NoProcessableTask)
+                } else {
+                    let result = state.remove(0);
+                    if state.is_empty() {
+                        self.shutdown.store(true, Ordering::Relaxed);
+                    }
+                    result
+                }
+            }
+
+            fn run_maintenance(
+                &mut self,
+                queues: &[String],
+            ) -> Result<ServerMaintenanceRun, ProcessorError> {
+                *self.maintenance_calls.lock().unwrap() += 1;
+                assert_eq!(queues, ["critical".to_owned()]);
+                Ok(ServerMaintenanceRun::default())
+            }
+        }
+
+        #[derive(Debug, Clone, Default)]
+        struct NoopSleeper;
+
+        impl Sleeper for NoopSleeper {
+            fn sleep(&mut self, _duration: Duration) {}
+        }
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let processor = ParallelProcessor {
+            state: Arc::new(std::sync::Mutex::new(vec![
+                Ok(ProcessorRun::Completed {
+                    task_id: "task-a".to_owned(),
+                }),
+                Ok(ProcessorRun::Completed {
+                    task_id: "task-b".to_owned(),
+                }),
+            ])),
+            queue_calls: Arc::new(std::sync::Mutex::new(0)),
+            maintenance_calls: Arc::new(std::sync::Mutex::new(0)),
+            shutdown: Arc::clone(&shutdown),
+        };
+        let server = Server::with_sleeper(processor, ["critical"], NoopSleeper).unwrap();
+
+        let summary = server
+            .run_until_stopped_parallel(2, Arc::clone(&shutdown))
+            .unwrap();
+
+        assert_eq!(summary.processed(), 2);
+        assert_eq!(summary.completed(), 2);
+        assert_eq!(summary.retried(), 0);
+        assert_eq!(summary.archived(), 0);
+        assert_eq!(summary.revoked(), 0);
+        assert!(summary.idle_polls() <= 2);
     }
 }
