@@ -2,6 +2,12 @@
 
 ## 2026-05-15
 
+- Split `src/broker/redis/broker.rs` test coverage into
+  `src/broker/redis/broker/tests.rs` to keep the broker implementation file
+  focused on runtime code.
+- No public API changes; this is a maintenance-only organization pass.
+- No new TODOs.
+
 - Replaced hand-written error `Display`, `Error::source`, and conversion
   boilerplate across public crate errors and Redis planning/script errors with
   `thiserror` derives while preserving existing public variants and mappings.
