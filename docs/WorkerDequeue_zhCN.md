@@ -177,8 +177,8 @@ println!(
 边界：signal 置位后停止拉取新任务；已经进入 handler 的任务会自然执行完。
 `Processor` 现在还有一个可配置的 pre-handler lease extension hook，默认是
 no-op；`ExtendLeaseBeforeProcess` 会在 handler 运行前先续约 active task。
-真正的 in-flight cancellation、后台 lease extender loop、shutdown requeue，
-以及和上游一样独立定时运行的 forwarder/recoverer 间隔还没有建模。
+真正的 in-flight cancellation、后台 lease extender loop、shutdown
+requeue，以及和上游一样独立定时运行的 forwarder/recoverer 间隔还没有建模。
 
 ## Dequeue
 

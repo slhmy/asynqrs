@@ -144,9 +144,8 @@ pub struct ExtendLeaseBeforeProcess;
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381>.
 ///
 /// TODO: Add worker concurrency, task context timeout/deadline handling, lease
-/// extender background loop, requeue-on-shutdown, sync retry, and upstream
-/// maintenance intervals once the full `Server` / `Processor` runtime is
-/// modeled.
+/// extender background loop, sync retry, and upstream maintenance intervals
+/// once the full `Server` / `Processor` runtime is modeled.
 #[derive(Debug, Clone)]
 pub struct Processor<
     B,
