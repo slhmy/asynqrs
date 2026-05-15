@@ -1,6 +1,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use thiserror::Error;
+
 /// State of a task in the queue lifecycle.
 ///
 /// Reference: Asynq v0.26.0 public `TaskState` constants and `String` mapping:
@@ -79,7 +81,8 @@ impl FromStr for TaskState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("unknown task state: {value}")]
 pub struct ParseTaskStateError {
     value: String,
 }
@@ -89,14 +92,6 @@ impl ParseTaskStateError {
         &self.value
     }
 }
-
-impl fmt::Display for ParseTaskStateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "unknown task state: {}", self.value)
-    }
-}
-
-impl std::error::Error for ParseTaskStateError {}
 
 #[cfg(test)]
 mod tests {

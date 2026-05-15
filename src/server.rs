@@ -4,6 +4,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use thiserror::Error;
+
 use crate::{
     ArchiveBroker, CompleteBroker, DequeueBroker, ErrorHandler, ForwardBroker, Handler, IsFailure,
     LeaseExtender, Processor, ProcessorError, ProcessorRun, RecoverBroker, RetryBroker, RetryDelay,
@@ -73,12 +75,17 @@ pub struct ServerMaintenanceRun {
     recovered_archived: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ServerError {
+    #[error("server requires at least one queue")]
     EmptyQueueList,
+    #[error("queue name must contain one or more characters")]
     EmptyQueueName,
+    #[error("server requires at least one worker")]
     EmptyWorkerCount,
+    #[error("server worker thread panicked")]
     WorkerThreadPanicked,
+    #[error("processor failed: {0}")]
     Processor(ProcessorError),
 }
 
@@ -392,30 +399,6 @@ where
 impl From<ProcessorError> for ServerError {
     fn from(error: ProcessorError) -> Self {
         Self::Processor(error)
-    }
-}
-
-impl std::fmt::Display for ServerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyQueueList => f.write_str("server requires at least one queue"),
-            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
-            Self::EmptyWorkerCount => f.write_str("server requires at least one worker"),
-            Self::WorkerThreadPanicked => f.write_str("server worker thread panicked"),
-            Self::Processor(error) => write!(f, "processor failed: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for ServerError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Processor(error) => Some(error),
-            Self::EmptyQueueList
-            | Self::EmptyQueueName
-            | Self::EmptyWorkerCount
-            | Self::WorkerThreadPanicked => None,
-        }
     }
 }
 

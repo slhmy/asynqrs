@@ -1,3 +1,5 @@
+use thiserror::Error;
+
 /// Minimal broker interface for moving due scheduled/retry tasks back to
 /// processable queues.
 ///
@@ -12,17 +14,8 @@ pub trait ForwardBroker {
     fn forward_retry(&mut self, queue: &str) -> Result<usize, ForwardError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ForwardError {
+    #[error("{0}")]
     Other(String),
 }
-
-impl std::fmt::Display for ForwardError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Other(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for ForwardError {}

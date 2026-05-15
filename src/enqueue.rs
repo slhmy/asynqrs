@@ -1,5 +1,7 @@
 use std::time::{Duration, SystemTime};
 
+use thiserror::Error;
+
 use crate::keys;
 use crate::message::{duration_seconds, unix_seconds};
 use crate::{Task, TaskMessage, TaskOption, TaskState};
@@ -29,13 +31,19 @@ pub struct EnqueuePlan {
     unique_lock_ttl: Option<Duration>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum EnqueuePlanError {
+    #[error("task typename cannot be empty")]
     EmptyTaskType,
+    #[error("queue name must contain one or more characters")]
     EmptyQueueName,
+    #[error("task ID cannot be empty")]
     EmptyTaskId,
+    #[error("Unique TTL cannot be less than 1s")]
     UniqueTtlTooShort,
+    #[error("group key cannot be empty")]
     EmptyGroupKey,
+    #[error("time overflow while computing {0}")]
     TimeOverflow(&'static str),
 }
 
@@ -250,21 +258,6 @@ impl ComposedOptions {
 fn is_blank(value: &str) -> bool {
     value.trim().is_empty()
 }
-
-impl std::fmt::Display for EnqueuePlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyTaskType => f.write_str("task typename cannot be empty"),
-            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
-            Self::EmptyTaskId => f.write_str("task ID cannot be empty"),
-            Self::UniqueTtlTooShort => f.write_str("Unique TTL cannot be less than 1s"),
-            Self::EmptyGroupKey => f.write_str("group key cannot be empty"),
-            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
-        }
-    }
-}
-
-impl std::error::Error for EnqueuePlanError {}
 
 #[cfg(test)]
 mod tests {

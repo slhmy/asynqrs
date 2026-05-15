@@ -1,4 +1,5 @@
 use crate::{RedisArg, RedisScript, RedisScriptCall};
+use thiserror::Error;
 
 /// Metadata and source for Asynq task lifecycle Lua scripts.
 ///
@@ -20,13 +21,15 @@ pub enum RedisScriptResult {
     DuplicateTask,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RedisScriptCallError {
+    #[error("{} script expected {expected} keys, got {actual}", script.name())]
     WrongKeyCount {
         script: RedisScript,
         expected: usize,
         actual: usize,
     },
+    #[error("{} script expected {expected} args, got {actual}", script.name())]
     WrongArgCount {
         script: RedisScript,
         expected: usize,
@@ -269,33 +272,6 @@ impl RedisScriptSpec {
         self.arg_count
     }
 }
-
-impl std::fmt::Display for RedisScriptCallError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::WrongKeyCount {
-                script,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "{} script expected {expected} keys, got {actual}",
-                script.name()
-            ),
-            Self::WrongArgCount {
-                script,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "{} script expected {expected} args, got {actual}",
-                script.name()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for RedisScriptCallError {}
 
 // Source: Asynq v0.26.0 `enqueueCmd`.
 const ENQUEUE_SOURCE: &str = r#"

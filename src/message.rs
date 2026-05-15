@@ -1,12 +1,14 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use prost::Message;
+use thiserror::Error;
 
 use crate::{Task, TaskOption, pb};
 
 pub use pb::asynq::TaskMessage;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
+#[error("failed to decode task message: {0}")]
 pub struct DecodeTaskMessageError(prost::DecodeError);
 
 impl TaskMessage {
@@ -103,18 +105,6 @@ pub(crate) fn unix_seconds(time: SystemTime) -> i64 {
 impl DecodeTaskMessageError {
     pub fn source(&self) -> &prost::DecodeError {
         &self.0
-    }
-}
-
-impl std::fmt::Display for DecodeTaskMessageError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "failed to decode task message: {}", self.0)
-    }
-}
-
-impl std::error::Error for DecodeTaskMessageError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.0)
     }
 }
 

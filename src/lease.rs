@@ -1,5 +1,7 @@
 use std::time::SystemTime;
 
+use thiserror::Error;
+
 /// Minimal broker interface for extending the lease of an active task.
 ///
 /// Reference: Asynq v0.26.0 `RDB.ExtendLease` updates active-task lease scores
@@ -17,8 +19,9 @@ pub struct LeaseExtension {
     expires_at: SystemTime,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LeaseError {
+    #[error("{0}")]
     Other(String),
 }
 
@@ -31,13 +34,3 @@ impl LeaseExtension {
         self.expires_at
     }
 }
-
-impl std::fmt::Display for LeaseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Other(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for LeaseError {}

@@ -1,5 +1,7 @@
 use std::time::SystemTime;
 
+use thiserror::Error;
+
 use crate::{EnqueuePlan, EnqueuePlanError, Task, TaskOption, TaskState};
 
 /// Minimal broker interface for the client enqueue path.
@@ -60,16 +62,21 @@ pub struct EnqueueResult {
     next_process_at: Option<SystemTime>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ClientError {
-    Plan(EnqueuePlanError),
-    Broker(BrokerError),
+    #[error("failed to build enqueue plan: {0}")]
+    Plan(#[from] EnqueuePlanError),
+    #[error("broker failed to enqueue task: {0}")]
+    Broker(#[from] BrokerError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum BrokerError {
+    #[error("task already exists")]
     DuplicateTask,
+    #[error("task ID conflicts with another task")]
     TaskIdConflict,
+    #[error("{0}")]
     Other(String),
 }
 
@@ -162,48 +169,6 @@ impl EnqueueResult {
         self.next_process_at
     }
 }
-
-impl std::fmt::Display for ClientError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Plan(error) => write!(f, "failed to build enqueue plan: {error}"),
-            Self::Broker(error) => write!(f, "broker failed to enqueue task: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for ClientError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Plan(error) => Some(error),
-            Self::Broker(error) => Some(error),
-        }
-    }
-}
-
-impl From<EnqueuePlanError> for ClientError {
-    fn from(error: EnqueuePlanError) -> Self {
-        Self::Plan(error)
-    }
-}
-
-impl From<BrokerError> for ClientError {
-    fn from(error: BrokerError) -> Self {
-        Self::Broker(error)
-    }
-}
-
-impl std::fmt::Display for BrokerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DuplicateTask => f.write_str("task already exists"),
-            Self::TaskIdConflict => f.write_str("task ID conflicts with another task"),
-            Self::Other(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for BrokerError {}
 
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,7 @@
 use std::time::SystemTime;
 
+use thiserror::Error;
+
 use crate::TaskMessage;
 
 /// Minimal broker interface for retrying a failed active task.
@@ -19,19 +21,10 @@ pub trait RetryBroker {
     ) -> Result<(), RetryError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RetryError {
+    #[error("task not found")]
     NotFound,
+    #[error("{0}")]
     Other(String),
 }
-
-impl std::fmt::Display for RetryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound => f.write_str("task not found"),
-            Self::Other(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for RetryError {}

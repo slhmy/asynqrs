@@ -2,6 +2,13 @@
 
 ## 2026-05-15
 
+- Replaced hand-written error `Display`, `Error::source`, and conversion
+  boilerplate across public crate errors and Redis planning/script errors with
+  `thiserror` derives while preserving existing public variants and mappings.
+- Reference: Rust-specific maintenance refactor; Asynq Redis behavior is
+  unchanged.
+- No new TODOs.
+
 - Added the first async Redis boundary with `AsyncRedisExecutor`,
   `AsyncRedisConnectionExecutor`, and async `AsyncRedisBroker` enqueue,
   dequeue, complete, retry, and archive paths, plus unit tests for those async

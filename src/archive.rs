@@ -1,5 +1,7 @@
 use std::time::SystemTime;
 
+use thiserror::Error;
+
 use crate::TaskMessage;
 
 /// Minimal broker interface for archiving a failed active task.
@@ -20,19 +22,10 @@ pub trait ArchiveBroker {
     ) -> Result<(), ArchiveError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ArchiveError {
+    #[error("task not found")]
     NotFound,
+    #[error("{0}")]
     Other(String),
 }
-
-impl std::fmt::Display for ArchiveError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound => f.write_str("task not found"),
-            Self::Other(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for ArchiveError {}

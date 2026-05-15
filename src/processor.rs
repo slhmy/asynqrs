@@ -1,6 +1,8 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, SystemTime};
 
+use thiserror::Error;
+
 use crate::{
     ArchiveBroker, ArchiveError, Clock, CompleteBroker, CompleteError,
     DEFAULT_SERVER_RECOVER_RETRY_DELAY, DequeueBroker, DequeueError, ForwardBroker, ForwardError,
@@ -30,11 +32,15 @@ where
 /// Reference: Asynq v0.26.0 `SkipRetry` and `RevokeTask` handler sentinel
 /// errors:
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L327-L348>.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum HandlerError {
+    #[error("{0}")]
     Failed(String),
+    #[error("{0}")]
     SkipRetry(String),
+    #[error("{0}")]
     RevokeTask(String),
+    #[error("{0}")]
     Panic(String),
 }
 
@@ -183,15 +189,23 @@ pub enum ProcessorRun {
     NoProcessableTask,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProcessorError {
-    Dequeue(DequeueError),
-    Complete(CompleteError),
-    Retry(RetryError),
-    Archive(ArchiveError),
-    Lease(LeaseError),
-    Forward(ForwardError),
-    Recover(RecoverError),
+    #[error("failed to dequeue task: {0}")]
+    Dequeue(#[from] DequeueError),
+    #[error("failed to complete task: {0}")]
+    Complete(#[from] CompleteError),
+    #[error("failed to retry task: {0}")]
+    Retry(#[from] RetryError),
+    #[error("failed to archive task: {0}")]
+    Archive(#[from] ArchiveError),
+    #[error("failed to extend task lease: {0}")]
+    Lease(#[from] LeaseError),
+    #[error("failed to forward ready tasks: {0}")]
+    Forward(#[from] ForwardError),
+    #[error("failed to recover expired leases: {0}")]
+    Recover(#[from] RecoverError),
+    #[error("{0} overflowed")]
     TimeOverflow(&'static str),
 }
 
@@ -561,91 +575,6 @@ impl HandlerError {
 
     pub fn revoke_task(message: impl Into<String>) -> Self {
         Self::RevokeTask(message.into())
-    }
-}
-
-impl std::fmt::Display for HandlerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Failed(message)
-            | Self::SkipRetry(message)
-            | Self::RevokeTask(message)
-            | Self::Panic(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for HandlerError {}
-
-impl std::fmt::Display for ProcessorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Dequeue(error) => write!(f, "failed to dequeue task: {error}"),
-            Self::Complete(error) => write!(f, "failed to complete task: {error}"),
-            Self::Retry(error) => write!(f, "failed to retry task: {error}"),
-            Self::Archive(error) => write!(f, "failed to archive task: {error}"),
-            Self::Lease(error) => write!(f, "failed to extend task lease: {error}"),
-            Self::Forward(error) => write!(f, "failed to forward ready tasks: {error}"),
-            Self::Recover(error) => write!(f, "failed to recover expired leases: {error}"),
-            Self::TimeOverflow(context) => write!(f, "{context} overflowed"),
-        }
-    }
-}
-
-impl std::error::Error for ProcessorError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Dequeue(error) => Some(error),
-            Self::Complete(error) => Some(error),
-            Self::Retry(error) => Some(error),
-            Self::Archive(error) => Some(error),
-            Self::Lease(error) => Some(error),
-            Self::Forward(error) => Some(error),
-            Self::Recover(error) => Some(error),
-            Self::TimeOverflow(_) => None,
-        }
-    }
-}
-
-impl From<DequeueError> for ProcessorError {
-    fn from(error: DequeueError) -> Self {
-        Self::Dequeue(error)
-    }
-}
-
-impl From<CompleteError> for ProcessorError {
-    fn from(error: CompleteError) -> Self {
-        Self::Complete(error)
-    }
-}
-
-impl From<RetryError> for ProcessorError {
-    fn from(error: RetryError) -> Self {
-        Self::Retry(error)
-    }
-}
-
-impl From<ArchiveError> for ProcessorError {
-    fn from(error: ArchiveError) -> Self {
-        Self::Archive(error)
-    }
-}
-
-impl From<LeaseError> for ProcessorError {
-    fn from(error: LeaseError) -> Self {
-        Self::Lease(error)
-    }
-}
-
-impl From<ForwardError> for ProcessorError {
-    fn from(error: ForwardError) -> Self {
-        Self::Forward(error)
-    }
-}
-
-impl From<RecoverError> for ProcessorError {
-    fn from(error: RecoverError) -> Self {
-        Self::Recover(error)
     }
 }
 

@@ -1,3 +1,5 @@
+use thiserror::Error;
+
 use crate::TaskMessage;
 
 /// Minimal broker interface for marking a dequeued task as successfully done.
@@ -12,19 +14,10 @@ pub trait CompleteBroker {
     fn complete(&mut self, message: &TaskMessage) -> Result<(), CompleteError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CompleteError {
+    #[error("task not found")]
     NotFound,
+    #[error("{0}")]
     Other(String),
 }
-
-impl std::fmt::Display for CompleteError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound => f.write_str("task not found"),
-            Self::Other(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for CompleteError {}

@@ -1,3 +1,5 @@
+use thiserror::Error;
+
 use crate::TaskMessage;
 
 /// Minimal broker interface for moving an active task back to pending.
@@ -11,19 +13,10 @@ pub trait RequeueBroker {
     fn requeue(&mut self, message: &TaskMessage) -> Result<(), RequeueError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RequeueError {
+    #[error("task not found")]
     NotFound,
+    #[error("{0}")]
     Other(String),
 }
-
-impl std::fmt::Display for RequeueError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound => f.write_str("task not found"),
-            Self::Other(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for RequeueError {}

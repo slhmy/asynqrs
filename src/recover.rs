@@ -1,5 +1,7 @@
 use std::time::SystemTime;
 
+use thiserror::Error;
+
 /// Summary of lease-expired active tasks recovered in one batch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RecoverResult {
@@ -25,8 +27,9 @@ pub trait RecoverBroker {
     ) -> Result<RecoverResult, RecoverError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RecoverError {
+    #[error("{0}")]
     Other(String),
 }
 
@@ -47,13 +50,3 @@ impl RecoverResult {
         self.retried + self.archived
     }
 }
-
-impl std::fmt::Display for RecoverError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Other(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for RecoverError {}

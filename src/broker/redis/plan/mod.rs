@@ -1,5 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use thiserror::Error;
+
 use crate::keys;
 use crate::message::{duration_seconds, unix_seconds};
 use crate::{EnqueuePlan, TaskMessage, TaskState};
@@ -155,66 +157,93 @@ pub enum RedisArg {
     I64(i64),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RedisEnqueuePlanError {
+    #[error("cannot enqueue Redis command plan for {0} state")]
     UnsupportedState(TaskState),
+    #[error("scheduled enqueue plan is missing process time")]
     MissingScheduledProcessTime,
+    #[error("aggregating enqueue plan is missing group key")]
     MissingGroupKey,
+    #[error("unique enqueue plan is missing unique key")]
     MissingUniqueKey,
+    #[error("unique enqueue plan is missing lock ttl")]
     MissingUniqueLockTtl,
+    #[error("time overflow while computing {0}")]
     TimeOverflow(&'static str),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RedisDequeuePlanError {
+    #[error("dequeue requires at least one queue")]
     EmptyQueueList,
+    #[error("queue name must contain one or more characters")]
     EmptyQueueName,
+    #[error("time overflow while computing {0}")]
     TimeOverflow(&'static str),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RedisCompletePlanError {
+    #[error("queue name must contain one or more characters")]
     EmptyQueueName,
+    #[error("task id must contain one or more characters")]
     EmptyTaskId,
+    #[error("time overflow while computing {0}")]
     TimeOverflow(&'static str),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RedisRetryPlanError {
+    #[error("queue name must contain one or more characters")]
     EmptyQueueName,
+    #[error("task id must contain one or more characters")]
     EmptyTaskId,
+    #[error("time overflow while computing {0}")]
     TimeOverflow(&'static str),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RedisArchivePlanError {
+    #[error("queue name must contain one or more characters")]
     EmptyQueueName,
+    #[error("task id must contain one or more characters")]
     EmptyTaskId,
+    #[error("time overflow while computing {0}")]
     TimeOverflow(&'static str),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RedisRequeuePlanError {
+    #[error("queue name must contain one or more characters")]
     EmptyQueueName,
+    #[error("task id must contain one or more characters")]
     EmptyTaskId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RedisForwardPlanError {
+    #[error("queue name must contain one or more characters")]
     EmptyQueueName,
+    #[error("time overflow while computing {0}")]
     TimeOverflow(&'static str),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RedisRecoverPlanError {
+    #[error("queue name must contain one or more characters")]
     EmptyQueueName,
+    #[error("time overflow while computing {0}")]
     TimeOverflow(&'static str),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RedisExtendLeasePlanError {
+    #[error("queue name must contain one or more characters")]
     EmptyQueueName,
+    #[error("task id must contain one or more characters")]
     EmptyTaskId,
+    #[error("time overflow while computing {0}")]
     TimeOverflow(&'static str),
 }
 
@@ -982,118 +1011,6 @@ fn unix_seconds_extend_lease(
 fn duration_nanoseconds(duration: Duration) -> i128 {
     i128::from(duration.as_secs()) * 1_000_000_000 + i128::from(duration.subsec_nanos())
 }
-
-impl std::fmt::Display for RedisEnqueuePlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnsupportedState(state) => {
-                write!(f, "cannot enqueue Redis command plan for {state} state")
-            }
-            Self::MissingScheduledProcessTime => {
-                f.write_str("scheduled enqueue plan is missing process time")
-            }
-            Self::MissingGroupKey => f.write_str("aggregating enqueue plan is missing group key"),
-            Self::MissingUniqueKey => f.write_str("unique enqueue plan is missing unique key"),
-            Self::MissingUniqueLockTtl => f.write_str("unique enqueue plan is missing lock ttl"),
-            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
-        }
-    }
-}
-
-impl std::error::Error for RedisEnqueuePlanError {}
-
-impl std::fmt::Display for RedisDequeuePlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyQueueList => f.write_str("dequeue requires at least one queue"),
-            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
-            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
-        }
-    }
-}
-
-impl std::error::Error for RedisDequeuePlanError {}
-
-impl std::fmt::Display for RedisCompletePlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
-            Self::EmptyTaskId => f.write_str("task id must contain one or more characters"),
-            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
-        }
-    }
-}
-
-impl std::error::Error for RedisCompletePlanError {}
-
-impl std::fmt::Display for RedisRetryPlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
-            Self::EmptyTaskId => f.write_str("task id must contain one or more characters"),
-            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
-        }
-    }
-}
-
-impl std::error::Error for RedisRetryPlanError {}
-
-impl std::fmt::Display for RedisArchivePlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
-            Self::EmptyTaskId => f.write_str("task id must contain one or more characters"),
-            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
-        }
-    }
-}
-
-impl std::error::Error for RedisArchivePlanError {}
-
-impl std::fmt::Display for RedisRequeuePlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
-            Self::EmptyTaskId => f.write_str("task id must contain one or more characters"),
-        }
-    }
-}
-
-impl std::error::Error for RedisRequeuePlanError {}
-
-impl std::fmt::Display for RedisForwardPlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
-            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
-        }
-    }
-}
-
-impl std::error::Error for RedisForwardPlanError {}
-
-impl std::fmt::Display for RedisRecoverPlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
-            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
-        }
-    }
-}
-
-impl std::error::Error for RedisRecoverPlanError {}
-
-impl std::fmt::Display for RedisExtendLeasePlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyQueueName => f.write_str("queue name must contain one or more characters"),
-            Self::EmptyTaskId => f.write_str("task id must contain one or more characters"),
-            Self::TimeOverflow(context) => write!(f, "time overflow while computing {context}"),
-        }
-    }
-}
-
-impl std::error::Error for RedisExtendLeasePlanError {}
 
 #[cfg(test)]
 mod tests {

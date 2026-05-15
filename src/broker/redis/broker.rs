@@ -1,5 +1,7 @@
 use std::time::SystemTime;
 
+use thiserror::Error;
+
 use crate::{
     ArchiveBroker, ArchiveError, AsyncRedisExecutor, Broker, BrokerError, Clock, CompleteBroker,
     CompleteError, DecodeTaskMessageError, DequeueBroker, DequeueError, DequeuedTask, EnqueuePlan,
@@ -55,26 +57,41 @@ pub struct RedisBroker<E, C = SystemClock> {
     clock: C,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{message}")]
 pub struct RedisExecutorError {
     message: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum RedisBrokerError {
-    Plan(RedisEnqueuePlanError),
-    DequeuePlan(RedisDequeuePlanError),
-    CompletePlan(RedisCompletePlanError),
-    RetryPlan(RedisRetryPlanError),
-    ArchivePlan(RedisArchivePlanError),
-    RequeuePlan(RedisRequeuePlanError),
-    ForwardPlan(RedisForwardPlanError),
-    RecoverPlan(RedisRecoverPlanError),
-    ExtendLeasePlan(RedisExtendLeasePlanError),
-    ScriptCall(RedisScriptCallError),
-    Executor(RedisExecutorError),
-    Decode(DecodeTaskMessageError),
+    #[error("failed to build Redis enqueue plan: {0}")]
+    Plan(#[from] RedisEnqueuePlanError),
+    #[error("failed to build Redis dequeue plan: {0}")]
+    DequeuePlan(#[from] RedisDequeuePlanError),
+    #[error("failed to build Redis complete plan: {0}")]
+    CompletePlan(#[from] RedisCompletePlanError),
+    #[error("failed to build Redis retry plan: {0}")]
+    RetryPlan(#[from] RedisRetryPlanError),
+    #[error("failed to build Redis archive plan: {0}")]
+    ArchivePlan(#[from] RedisArchivePlanError),
+    #[error("failed to build Redis requeue plan: {0}")]
+    RequeuePlan(#[from] RedisRequeuePlanError),
+    #[error("failed to build Redis forward plan: {0}")]
+    ForwardPlan(#[from] RedisForwardPlanError),
+    #[error("failed to build Redis recover plan: {0}")]
+    RecoverPlan(#[from] RedisRecoverPlanError),
+    #[error("failed to build Redis extend lease plan: {0}")]
+    ExtendLeasePlan(#[from] RedisExtendLeasePlanError),
+    #[error("invalid Redis script call: {0}")]
+    ScriptCall(#[from] RedisScriptCallError),
+    #[error("Redis executor failed: {0}")]
+    Executor(#[from] RedisExecutorError),
+    #[error("failed to decode dequeued task message: {0}")]
+    Decode(#[from] DecodeTaskMessageError),
+    #[error("unexpected {script:?} script result: {result}")]
     UnexpectedScriptResult { script: RedisScript, result: i64 },
+    #[error("unexpected {script:?} script status: {status}")]
     UnexpectedScriptStatus { script: RedisScript, status: String },
 }
 
@@ -742,115 +759,6 @@ impl RedisExecutorError {
     }
 }
 
-impl std::fmt::Display for RedisExecutorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for RedisExecutorError {}
-
-impl std::fmt::Display for RedisBrokerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Plan(error) => write!(f, "failed to build Redis enqueue plan: {error}"),
-            Self::DequeuePlan(error) => write!(f, "failed to build Redis dequeue plan: {error}"),
-            Self::CompletePlan(error) => write!(f, "failed to build Redis complete plan: {error}"),
-            Self::RetryPlan(error) => write!(f, "failed to build Redis retry plan: {error}"),
-            Self::ArchivePlan(error) => write!(f, "failed to build Redis archive plan: {error}"),
-            Self::RequeuePlan(error) => write!(f, "failed to build Redis requeue plan: {error}"),
-            Self::ForwardPlan(error) => write!(f, "failed to build Redis forward plan: {error}"),
-            Self::RecoverPlan(error) => write!(f, "failed to build Redis recover plan: {error}"),
-            Self::ExtendLeasePlan(error) => {
-                write!(f, "failed to build Redis extend lease plan: {error}")
-            }
-            Self::ScriptCall(error) => write!(f, "invalid Redis script call: {error}"),
-            Self::Executor(error) => write!(f, "Redis executor failed: {error}"),
-            Self::Decode(error) => write!(f, "failed to decode dequeued task message: {error}"),
-            Self::UnexpectedScriptResult { script, result } => {
-                write!(f, "unexpected {script:?} script result: {result}")
-            }
-            Self::UnexpectedScriptStatus { script, status } => {
-                write!(f, "unexpected {script:?} script status: {status}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for RedisBrokerError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Plan(error) => Some(error),
-            Self::DequeuePlan(error) => Some(error),
-            Self::CompletePlan(error) => Some(error),
-            Self::RetryPlan(error) => Some(error),
-            Self::ArchivePlan(error) => Some(error),
-            Self::RequeuePlan(error) => Some(error),
-            Self::ForwardPlan(error) => Some(error),
-            Self::RecoverPlan(error) => Some(error),
-            Self::ExtendLeasePlan(error) => Some(error),
-            Self::ScriptCall(error) => Some(error),
-            Self::Executor(error) => Some(error),
-            Self::Decode(error) => Some(error),
-            Self::UnexpectedScriptResult { .. } | Self::UnexpectedScriptStatus { .. } => None,
-        }
-    }
-}
-
-impl From<RedisEnqueuePlanError> for RedisBrokerError {
-    fn from(error: RedisEnqueuePlanError) -> Self {
-        Self::Plan(error)
-    }
-}
-
-impl From<RedisDequeuePlanError> for RedisBrokerError {
-    fn from(error: RedisDequeuePlanError) -> Self {
-        Self::DequeuePlan(error)
-    }
-}
-
-impl From<RedisCompletePlanError> for RedisBrokerError {
-    fn from(error: RedisCompletePlanError) -> Self {
-        Self::CompletePlan(error)
-    }
-}
-
-impl From<RedisRetryPlanError> for RedisBrokerError {
-    fn from(error: RedisRetryPlanError) -> Self {
-        Self::RetryPlan(error)
-    }
-}
-
-impl From<RedisArchivePlanError> for RedisBrokerError {
-    fn from(error: RedisArchivePlanError) -> Self {
-        Self::ArchivePlan(error)
-    }
-}
-
-impl From<RedisRequeuePlanError> for RedisBrokerError {
-    fn from(error: RedisRequeuePlanError) -> Self {
-        Self::RequeuePlan(error)
-    }
-}
-
-impl From<RedisForwardPlanError> for RedisBrokerError {
-    fn from(error: RedisForwardPlanError) -> Self {
-        Self::ForwardPlan(error)
-    }
-}
-
-impl From<RedisRecoverPlanError> for RedisBrokerError {
-    fn from(error: RedisRecoverPlanError) -> Self {
-        Self::RecoverPlan(error)
-    }
-}
-
-impl From<RedisExtendLeasePlanError> for RedisBrokerError {
-    fn from(error: RedisExtendLeasePlanError) -> Self {
-        Self::ExtendLeasePlan(error)
-    }
-}
-
 impl From<RedisBrokerError> for RecoverError {
     fn from(error: RedisBrokerError) -> Self {
         match error {
@@ -873,24 +781,6 @@ impl From<RedisBrokerError> for RecoverError {
                 Self::Other(format!("unexpected {script:?} script status: {status}"))
             }
         }
-    }
-}
-
-impl From<RedisExecutorError> for RedisBrokerError {
-    fn from(error: RedisExecutorError) -> Self {
-        Self::Executor(error)
-    }
-}
-
-impl From<RedisScriptCallError> for RedisBrokerError {
-    fn from(error: RedisScriptCallError) -> Self {
-        Self::ScriptCall(error)
-    }
-}
-
-impl From<DecodeTaskMessageError> for RedisBrokerError {
-    fn from(error: DecodeTaskMessageError) -> Self {
-        Self::Decode(error)
     }
 }
 

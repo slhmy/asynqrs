@@ -1,5 +1,7 @@
 use std::time::SystemTime;
 
+use thiserror::Error;
+
 use crate::TaskMessage;
 
 /// Result of moving a task from pending to active for worker processing.
@@ -21,9 +23,11 @@ pub trait DequeueBroker {
     fn dequeue(&mut self, queues: &[String]) -> Result<DequeuedTask, DequeueError>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DequeueError {
+    #[error("no processable task found")]
     NoProcessableTask,
+    #[error("{0}")]
     Other(String),
 }
 
@@ -47,14 +51,3 @@ impl DequeuedTask {
         self.lease_expires_at
     }
 }
-
-impl std::fmt::Display for DequeueError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoProcessableTask => f.write_str("no processable task found"),
-            Self::Other(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for DequeueError {}
