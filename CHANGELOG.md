@@ -2,6 +2,12 @@
 
 ## 2026-05-15
 
+- Split Redis broker error types and lifecycle error mappings into
+  `src/broker/redis/broker/error.rs`, leaving `broker.rs` focused on broker
+  execution logic.
+- No public API changes; this is a maintenance-only organization pass.
+- No new TODOs.
+
 - Split `src/broker/redis/broker.rs` test coverage into
   `src/broker/redis/broker/tests.rs` to keep the broker implementation file
   focused on runtime code.
