@@ -1000,6 +1000,61 @@ fn server_run_until_stopped_processes_tasks_and_sleeps_when_idle() {
 }
 
 #[test]
+fn server_maintenance_forwards_scheduled_task_before_processing() {
+    let Some(mut fixture) = RedisFixture::new("server-forward") else {
+        return;
+    };
+    let mut client = fixture.client();
+    let task = Task::new_with_options(
+        "email:scheduled",
+        b"payload".to_vec(),
+        [
+            TaskOption::queue(fixture.queue()),
+            TaskOption::task_id("scheduled-id"),
+            TaskOption::process_in(Duration::from_secs(3600)),
+        ],
+    );
+
+    let result = client.enqueue(&task).unwrap();
+
+    assert_eq!(result.state(), TaskState::Scheduled);
+    let _: usize = fixture
+        .connection
+        .zadd(fixture.scheduled_key(), "scheduled-id", 0)
+        .unwrap();
+    let broker = client.into_broker();
+    let processor = Processor::new(broker, |_task: &Task| Ok(()));
+    let mut server = Server::with_sleeper(
+        processor,
+        [fixture.queue().to_owned()],
+        RecordingSleeper::default(),
+    )
+    .unwrap();
+    let mut shutdown = StopAfter { remaining_runs: 1 };
+
+    let summary = server.run_until_stopped(&mut shutdown).unwrap();
+
+    assert_eq!(summary.forwarded_scheduled(), 1);
+    assert_eq!(summary.forwarded_retry(), 0);
+    assert_eq!(summary.recovered_retried(), 0);
+    assert_eq!(summary.recovered_archived(), 0);
+    assert_eq!(summary.processed(), 1);
+    assert_eq!(summary.completed(), 1);
+    assert_eq!(summary.idle_polls(), 0);
+    assert!(
+        !fixture
+            .connection
+            .exists::<_, bool>(fixture.task_key("scheduled-id"))
+            .unwrap()
+    );
+    let scheduled_score: Option<f64> = fixture
+        .connection
+        .zscore(fixture.scheduled_key(), "scheduled-id")
+        .unwrap();
+    assert!(scheduled_score.is_none());
+}
+
+#[test]
 fn unique_enqueue_sets_unique_key_and_rejects_duplicate() {
     let Some(mut fixture) = RedisFixture::new("unique") else {
         return;

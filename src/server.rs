@@ -1,11 +1,12 @@
 use std::time::Duration;
 
 use crate::{
-    ArchiveBroker, CompleteBroker, DequeueBroker, ErrorHandler, Handler, IsFailure, Processor,
-    ProcessorError, ProcessorRun, RetryBroker, RetryDelay,
+    ArchiveBroker, CompleteBroker, DequeueBroker, ErrorHandler, ForwardBroker, Handler, IsFailure,
+    Processor, ProcessorError, ProcessorRun, RecoverBroker, RetryBroker, RetryDelay,
 };
 
 pub const DEFAULT_SERVER_IDLE_SLEEP: Duration = Duration::from_secs(1);
+pub const DEFAULT_SERVER_RECOVER_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 /// Minimal synchronous worker server loop.
 ///
@@ -14,8 +15,8 @@ pub const DEFAULT_SERVER_IDLE_SLEEP: Duration = Duration::from_secs(1);
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L663-L721>.
 ///
 /// TODO: Add worker concurrency, task context timeout/deadline handling, lease
-/// extension, shutdown requeue, and sync retry once async/cancellation
-/// semantics are modeled.
+/// extension, shutdown requeue, sync retry, and upstream maintenance intervals
+/// once async/cancellation semantics are modeled.
 #[derive(Debug, Clone)]
 pub struct Server<P, S = SystemSleeper> {
     processor: P,
@@ -37,6 +38,13 @@ pub trait ShutdownSignal {
 
 pub trait WorkerProcessor {
     fn run_once(&mut self, queues: &[String]) -> Result<ProcessorRun, ProcessorError>;
+
+    fn run_maintenance(
+        &mut self,
+        _queues: &[String],
+    ) -> Result<ServerMaintenanceRun, ProcessorError> {
+        Ok(ServerMaintenanceRun::default())
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -47,6 +55,18 @@ pub struct ServerRunSummary {
     archived: usize,
     revoked: usize,
     idle_polls: usize,
+    forwarded_scheduled: usize,
+    forwarded_retry: usize,
+    recovered_retried: usize,
+    recovered_archived: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerMaintenanceRun {
+    forwarded_scheduled: usize,
+    forwarded_retry: usize,
+    recovered_retried: usize,
+    recovered_archived: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +149,7 @@ where
     {
         let mut summary = ServerRunSummary::default();
         while !shutdown.should_stop() {
+            summary.record_maintenance(self.processor.run_maintenance(&self.queues)?);
             match self.processor.run_once(&self.queues)? {
                 ProcessorRun::NoProcessableTask => {
                     summary.idle_polls += 1;
@@ -166,6 +187,22 @@ impl ServerRunSummary {
         self.idle_polls
     }
 
+    pub fn forwarded_scheduled(&self) -> usize {
+        self.forwarded_scheduled
+    }
+
+    pub fn forwarded_retry(&self) -> usize {
+        self.forwarded_retry
+    }
+
+    pub fn recovered_retried(&self) -> usize {
+        self.recovered_retried
+    }
+
+    pub fn recovered_archived(&self) -> usize {
+        self.recovered_archived
+    }
+
     fn record(&mut self, result: ProcessorRun) {
         self.processed += 1;
         match result {
@@ -175,6 +212,52 @@ impl ServerRunSummary {
             ProcessorRun::Revoked { .. } => self.revoked += 1,
             ProcessorRun::NoProcessableTask => self.idle_polls += 1,
         }
+    }
+
+    fn record_maintenance(&mut self, result: ServerMaintenanceRun) {
+        self.forwarded_scheduled += result.forwarded_scheduled;
+        self.forwarded_retry += result.forwarded_retry;
+        self.recovered_retried += result.recovered_retried;
+        self.recovered_archived += result.recovered_archived;
+    }
+}
+
+impl ServerMaintenanceRun {
+    pub fn new(
+        forwarded_scheduled: usize,
+        forwarded_retry: usize,
+        recovered_retried: usize,
+        recovered_archived: usize,
+    ) -> Self {
+        Self {
+            forwarded_scheduled,
+            forwarded_retry,
+            recovered_retried,
+            recovered_archived,
+        }
+    }
+
+    pub fn forwarded_scheduled(&self) -> usize {
+        self.forwarded_scheduled
+    }
+
+    pub fn forwarded_retry(&self) -> usize {
+        self.forwarded_retry
+    }
+
+    pub fn recovered_retried(&self) -> usize {
+        self.recovered_retried
+    }
+
+    pub fn recovered_archived(&self) -> usize {
+        self.recovered_archived
+    }
+
+    pub fn total(&self) -> usize {
+        self.forwarded_scheduled
+            + self.forwarded_retry
+            + self.recovered_retried
+            + self.recovered_archived
     }
 }
 
@@ -195,7 +278,7 @@ where
 
 impl<B, H, R, C, I, E> WorkerProcessor for Processor<B, H, R, C, I, E>
 where
-    B: DequeueBroker + CompleteBroker + RetryBroker + ArchiveBroker,
+    B: DequeueBroker + CompleteBroker + RetryBroker + ArchiveBroker + ForwardBroker + RecoverBroker,
     H: Handler,
     R: RetryDelay,
     C: crate::Clock,
@@ -204,6 +287,13 @@ where
 {
     fn run_once(&mut self, queues: &[String]) -> Result<ProcessorRun, ProcessorError> {
         Processor::run_once(self, queues)
+    }
+
+    fn run_maintenance(
+        &mut self,
+        queues: &[String],
+    ) -> Result<ServerMaintenanceRun, ProcessorError> {
+        Processor::run_maintenance(self, queues)
     }
 }
 
@@ -257,13 +347,27 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingProcessor {
         results: Vec<Result<ProcessorRun, ProcessorError>>,
+        maintenance: Vec<Result<ServerMaintenanceRun, ProcessorError>>,
         queue_calls: Vec<Vec<String>>,
+        maintenance_queue_calls: Vec<Vec<String>>,
     }
 
     impl WorkerProcessor for RecordingProcessor {
         fn run_once(&mut self, queues: &[String]) -> Result<ProcessorRun, ProcessorError> {
             self.queue_calls.push(queues.to_vec());
             self.results.remove(0)
+        }
+
+        fn run_maintenance(
+            &mut self,
+            queues: &[String],
+        ) -> Result<ServerMaintenanceRun, ProcessorError> {
+            self.maintenance_queue_calls.push(queues.to_vec());
+            if self.maintenance.is_empty() {
+                Ok(ServerMaintenanceRun::default())
+            } else {
+                self.maintenance.remove(0)
+            }
         }
     }
 
@@ -332,7 +436,15 @@ mod tests {
                     task_id: "revoked-id".to_owned(),
                 }),
             ],
+            maintenance: vec![
+                Ok(ServerMaintenanceRun::new(1, 0, 0, 0)),
+                Ok(ServerMaintenanceRun::default()),
+                Ok(ServerMaintenanceRun::new(0, 2, 1, 0)),
+                Ok(ServerMaintenanceRun::default()),
+                Ok(ServerMaintenanceRun::new(0, 0, 0, 1)),
+            ],
             queue_calls: Vec::new(),
+            maintenance_queue_calls: Vec::new(),
         };
         let mut server = Server::with_sleeper(
             processor,
@@ -351,9 +463,23 @@ mod tests {
         assert_eq!(summary.archived(), 1);
         assert_eq!(summary.revoked(), 1);
         assert_eq!(summary.idle_polls(), 1);
+        assert_eq!(summary.forwarded_scheduled(), 1);
+        assert_eq!(summary.forwarded_retry(), 2);
+        assert_eq!(summary.recovered_retried(), 1);
+        assert_eq!(summary.recovered_archived(), 1);
         assert_eq!(server.sleeper().durations, [Duration::from_millis(25)]);
         assert_eq!(
             server.processor().queue_calls,
+            vec![
+                vec!["critical".to_owned(), "default".to_owned()],
+                vec!["critical".to_owned(), "default".to_owned()],
+                vec!["critical".to_owned(), "default".to_owned()],
+                vec!["critical".to_owned(), "default".to_owned()],
+                vec!["critical".to_owned(), "default".to_owned()],
+            ]
+        );
+        assert_eq!(
+            server.processor().maintenance_queue_calls,
             vec![
                 vec!["critical".to_owned(), "default".to_owned()],
                 vec!["critical".to_owned(), "default".to_owned()],
@@ -370,7 +496,9 @@ mod tests {
             results: vec![Ok(ProcessorRun::Completed {
                 task_id: "task-id".to_owned(),
             })],
+            maintenance: Vec::new(),
             queue_calls: Vec::new(),
+            maintenance_queue_calls: Vec::new(),
         };
         let mut server =
             Server::with_sleeper(processor, ["critical"], RecordingSleeper::default()).unwrap();
@@ -380,6 +508,7 @@ mod tests {
 
         assert_eq!(summary, ServerRunSummary::default());
         assert!(server.processor().queue_calls.is_empty());
+        assert!(server.processor().maintenance_queue_calls.is_empty());
     }
 
     #[test]
@@ -388,7 +517,9 @@ mod tests {
             results: vec![Err(ProcessorError::Dequeue(DequeueError::Other(
                 "connection closed".to_owned(),
             )))],
+            maintenance: Vec::new(),
             queue_calls: Vec::new(),
+            maintenance_queue_calls: Vec::new(),
         };
         let mut server =
             Server::with_sleeper(processor, ["critical"], RecordingSleeper::default()).unwrap();
@@ -401,6 +532,37 @@ mod tests {
             ServerError::Processor(ProcessorError::Dequeue(DequeueError::Other(
                 "connection closed".to_owned()
             )))
+        );
+    }
+
+    #[test]
+    fn propagates_maintenance_errors() {
+        let processor = RecordingProcessor {
+            results: vec![Ok(ProcessorRun::Completed {
+                task_id: "task-id".to_owned(),
+            })],
+            maintenance: vec![Err(ProcessorError::Forward(crate::ForwardError::Other(
+                "redis unavailable".to_owned(),
+            )))],
+            queue_calls: Vec::new(),
+            maintenance_queue_calls: Vec::new(),
+        };
+        let mut server =
+            Server::with_sleeper(processor, ["critical"], RecordingSleeper::default()).unwrap();
+        let mut shutdown = StopAfter { remaining_runs: 1 };
+
+        let error = server.run_until_stopped(&mut shutdown).unwrap_err();
+
+        assert_eq!(
+            error,
+            ServerError::Processor(ProcessorError::Forward(crate::ForwardError::Other(
+                "redis unavailable".to_owned()
+            )))
+        );
+        assert!(server.processor().queue_calls.is_empty());
+        assert_eq!(
+            server.processor().maintenance_queue_calls,
+            [vec!["critical".to_owned()]]
         );
     }
 }

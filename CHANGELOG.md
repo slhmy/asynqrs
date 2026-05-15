@@ -2,6 +2,22 @@
 
 ## 2026-05-15
 
+- Added a synchronous server maintenance pass before each worker poll.
+- `WorkerProcessor::run_maintenance` and `Processor::run_maintenance` now
+  forward due scheduled/retry tasks and recover expired active-task leases for
+  each configured queue, with `ServerRunSummary` tracking forwarded and
+  recovered counts.
+- Covered maintenance with server unit tests and a Redis integration test where
+  a due scheduled task is forwarded and processed in the same server loop.
+- Updated worker lifecycle docs to describe server maintenance behavior.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L687-L695
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L861-L900
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/recoverer.go
+- TODO: Add upstream-style independent forwarder/recoverer intervals,
+  recoverer clock-skew cutoff, worker concurrency, lease extension,
+  shutdown requeue, and task cancellation once async runtime semantics are
+  modeled.
+
 - Fixed non-failure retry accounting so `RedisRetryPlan` preserves `retried`
   and skips processed/failed stats when `IsFailure` returns false.
 - Reference: https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L380-L418

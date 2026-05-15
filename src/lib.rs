@@ -49,8 +49,9 @@ pub use recover::{RecoverBroker, RecoverError, RecoverResult};
 pub use requeue::{RequeueBroker, RequeueError};
 pub use retry::{RetryBroker, RetryError};
 pub use server::{
-    DEFAULT_SERVER_IDLE_SLEEP, Server, ServerError, ServerRunSummary, ShutdownSignal, Sleeper,
-    SystemSleeper, WorkerProcessor,
+    DEFAULT_SERVER_IDLE_SLEEP, DEFAULT_SERVER_RECOVER_RETRY_DELAY, Server, ServerError,
+    ServerMaintenanceRun, ServerRunSummary, ShutdownSignal, Sleeper, SystemSleeper,
+    WorkerProcessor,
 };
 pub use state::{ParseTaskStateError, TaskState};
 pub use task::Task;

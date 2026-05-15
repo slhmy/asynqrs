@@ -2,8 +2,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, SystemTime};
 
 use crate::{
-    ArchiveBroker, ArchiveError, Clock, CompleteBroker, CompleteError, DequeueBroker, DequeueError,
-    RetryBroker, RetryError, SystemClock, Task, TaskMessage,
+    ArchiveBroker, ArchiveError, Clock, CompleteBroker, CompleteError,
+    DEFAULT_SERVER_RECOVER_RETRY_DELAY, DequeueBroker, DequeueError, ForwardBroker, ForwardError,
+    RecoverBroker, RecoverError, RetryBroker, RetryError, ServerMaintenanceRun, SystemClock, Task,
+    TaskMessage,
 };
 
 /// Processes a single task.
@@ -113,8 +115,8 @@ pub struct NoopErrorHandler;
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381>.
 ///
 /// TODO: Add worker concurrency, task context timeout/deadline handling, lease
-/// extension, requeue-on-shutdown, and sync retry once the full `Server` /
-/// `Processor` runtime is modeled.
+/// extension, requeue-on-shutdown, sync retry, and upstream maintenance
+/// intervals once the full `Server` / `Processor` runtime is modeled.
 #[derive(Debug, Clone)]
 pub struct Processor<
     B,
@@ -156,6 +158,8 @@ pub enum ProcessorError {
     Complete(CompleteError),
     Retry(RetryError),
     Archive(ArchiveError),
+    Forward(ForwardError),
+    Recover(RecoverError),
     TimeOverflow(&'static str),
 }
 
@@ -346,6 +350,53 @@ where
     }
 }
 
+impl<B, H, R, C, I, E> Processor<B, H, R, C, I, E>
+where
+    B: ForwardBroker + RecoverBroker,
+    C: Clock,
+{
+    /// Runs one synchronous server-maintenance pass.
+    ///
+    /// Reference: Asynq v0.26.0 starts background forwarder and recoverer
+    /// components from `Server.Start`:
+    /// <https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L687-L695>.
+    ///
+    /// TODO: Replace the fixed retry delay with upstream retry-delay
+    /// calculation and separate polling intervals when async server runtime is
+    /// modeled.
+    pub fn run_maintenance(
+        &mut self,
+        queues: &[String],
+    ) -> Result<ServerMaintenanceRun, ProcessorError> {
+        let mut forwarded_scheduled = 0;
+        let mut forwarded_retry = 0;
+        let mut recovered_retried = 0;
+        let mut recovered_archived = 0;
+        let retry_at = self
+            .clock
+            .now()
+            .checked_add(DEFAULT_SERVER_RECOVER_RETRY_DELAY)
+            .ok_or(ProcessorError::TimeOverflow("recovery retry time"))?;
+
+        for queue in queues {
+            forwarded_scheduled += self.broker.forward_scheduled(queue)?;
+            forwarded_retry += self.broker.forward_retry(queue)?;
+            let recovered =
+                self.broker
+                    .recover_expired_leases(queue, retry_at, "task lease expired")?;
+            recovered_retried += recovered.retried();
+            recovered_archived += recovered.archived();
+        }
+
+        Ok(ServerMaintenanceRun::new(
+            forwarded_scheduled,
+            forwarded_retry,
+            recovered_retried,
+            recovered_archived,
+        ))
+    }
+}
+
 impl DefaultRetryDelay {
     pub fn delay_for_retried_count(retried: i32) -> Duration {
         let n = retried.max(0) as u64;
@@ -432,6 +483,8 @@ impl std::fmt::Display for ProcessorError {
             Self::Complete(error) => write!(f, "failed to complete task: {error}"),
             Self::Retry(error) => write!(f, "failed to retry task: {error}"),
             Self::Archive(error) => write!(f, "failed to archive task: {error}"),
+            Self::Forward(error) => write!(f, "failed to forward ready tasks: {error}"),
+            Self::Recover(error) => write!(f, "failed to recover expired leases: {error}"),
             Self::TimeOverflow(context) => write!(f, "{context} overflowed"),
         }
     }
@@ -444,6 +497,8 @@ impl std::error::Error for ProcessorError {
             Self::Complete(error) => Some(error),
             Self::Retry(error) => Some(error),
             Self::Archive(error) => Some(error),
+            Self::Forward(error) => Some(error),
+            Self::Recover(error) => Some(error),
             Self::TimeOverflow(_) => None,
         }
     }
@@ -470,6 +525,18 @@ impl From<RetryError> for ProcessorError {
 impl From<ArchiveError> for ProcessorError {
     fn from(error: ArchiveError) -> Self {
         Self::Archive(error)
+    }
+}
+
+impl From<ForwardError> for ProcessorError {
+    fn from(error: ForwardError) -> Self {
+        Self::Forward(error)
+    }
+}
+
+impl From<RecoverError> for ProcessorError {
+    fn from(error: RecoverError) -> Self {
+        Self::Recover(error)
     }
 }
 
