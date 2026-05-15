@@ -624,6 +624,72 @@ where
         }
     }
 
+    pub async fn retry_with_now(
+        &mut self,
+        message: &TaskMessage,
+        now: SystemTime,
+        retry_at: SystemTime,
+        error_message: &str,
+        is_failure: bool,
+    ) -> Result<(), RetryError> {
+        let redis_plan =
+            RedisRetryPlan::from_message(message, now, retry_at, error_message, is_failure)
+                .map_err(RedisBrokerError::RetryPlan)
+                .map_err(RetryError::from)?;
+        let call = redis_plan.call();
+        call.validate()
+            .map_err(RedisBrokerError::ScriptCall)
+            .map_err(RetryError::from)?;
+        let status = self
+            .executor
+            .eval_script_status(call)
+            .await
+            .map_err(RedisBrokerError::Executor)
+            .map_err(RetryError::from)?;
+        if status == "OK" {
+            Ok(())
+        } else {
+            Err(RetryError::from(RedisBrokerError::UnexpectedScriptStatus {
+                script: call.script(),
+                status,
+            }))
+        }
+    }
+
+    pub async fn archive_with_now(
+        &mut self,
+        message: &TaskMessage,
+        now: SystemTime,
+        archived_at: SystemTime,
+        error_message: &str,
+        is_failure: bool,
+    ) -> Result<(), ArchiveError> {
+        let redis_plan =
+            RedisArchivePlan::from_message(message, now, archived_at, error_message, is_failure)
+                .map_err(RedisBrokerError::ArchivePlan)
+                .map_err(ArchiveError::from)?;
+        let call = redis_plan.call();
+        call.validate()
+            .map_err(RedisBrokerError::ScriptCall)
+            .map_err(ArchiveError::from)?;
+        let status = self
+            .executor
+            .eval_script_status(call)
+            .await
+            .map_err(RedisBrokerError::Executor)
+            .map_err(ArchiveError::from)?;
+        if status == "OK" {
+            Ok(())
+        } else {
+            Err(ArchiveError::from(
+                RedisBrokerError::UnexpectedScriptStatus {
+                    script: call.script(),
+                    status,
+                },
+            ))
+        }
+    }
+
     async fn execute(&mut self, operation: &RedisEnqueueOperation) -> Result<(), BrokerError> {
         match operation {
             RedisEnqueueOperation::PublishQueue { key, queue } => {
@@ -1389,6 +1455,85 @@ mod tests {
         assert_eq!(args[0], RedisArg::String("task-id".to_owned()));
         assert_eq!(args[2], RedisArg::I64(1_700_000_300));
         assert!(matches!(args[3], RedisArg::Bytes(_)));
+    }
+
+    #[tokio::test]
+    async fn async_broker_retries_failed_task_with_retry_script() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let retry_at = now + Duration::from_secs(60);
+        let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
+        msg.id = "task-id".to_owned();
+        msg.queue = "critical".to_owned();
+        let executor = FakeExecutor::default();
+        let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
+
+        broker
+            .retry_with_now(&msg, now, retry_at, "handler failed", true)
+            .await
+            .unwrap();
+
+        let calls = &broker.executor().calls;
+        assert_eq!(calls.len(), 1);
+        let ExecutorCall::EvalScriptStatus { script, keys, args } = &calls[0] else {
+            panic!("expected retry script call");
+        };
+        assert_eq!(*script, RedisScript::Retry);
+        assert_eq!(
+            keys,
+            &[
+                "asynq:{critical}:active".to_owned(),
+                "asynq:{critical}:lease".to_owned(),
+                "asynq:{critical}:retry".to_owned(),
+                "asynq:{critical}:t:task-id".to_owned(),
+                "asynq:{critical}:processed:2023-11-14".to_owned(),
+                "asynq:{critical}:processed".to_owned(),
+                "asynq:{critical}:failed:2023-11-14".to_owned(),
+                "asynq:{critical}:failed".to_owned(),
+            ]
+        );
+        assert_eq!(args[0], RedisArg::String("task-id".to_owned()));
+        assert!(matches!(args[1], RedisArg::Bytes(_)));
+        assert_eq!(args[2], RedisArg::I64(1_700_000_060));
+        assert_eq!(args[4], RedisArg::String("1".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn async_broker_archives_failed_task_with_archive_script() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
+        msg.id = "task-id".to_owned();
+        msg.queue = "critical".to_owned();
+        let executor = FakeExecutor::default();
+        let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
+
+        broker
+            .archive_with_now(&msg, now, now, "max retry exhausted", true)
+            .await
+            .unwrap();
+
+        let calls = &broker.executor().calls;
+        assert_eq!(calls.len(), 1);
+        let ExecutorCall::EvalScriptStatus { script, keys, args } = &calls[0] else {
+            panic!("expected archive script call");
+        };
+        assert_eq!(*script, RedisScript::Archive);
+        assert_eq!(
+            keys,
+            &[
+                "asynq:{critical}:active".to_owned(),
+                "asynq:{critical}:lease".to_owned(),
+                "asynq:{critical}:archived".to_owned(),
+                "asynq:{critical}:t:task-id".to_owned(),
+                "asynq:{critical}:processed:2023-11-14".to_owned(),
+                "asynq:{critical}:processed".to_owned(),
+                "asynq:{critical}:failed:2023-11-14".to_owned(),
+                "asynq:{critical}:failed".to_owned(),
+            ]
+        );
+        assert_eq!(args[0], RedisArg::String("task-id".to_owned()));
+        assert!(matches!(args[1], RedisArg::Bytes(_)));
+        assert_eq!(args[2], RedisArg::I64(1_700_000_000));
+        assert_eq!(args[4], RedisArg::String("1".to_owned()));
     }
 
     #[tokio::test]

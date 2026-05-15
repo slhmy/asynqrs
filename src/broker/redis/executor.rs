@@ -65,8 +65,8 @@ pub trait RedisCommandExecutor {
 /// persist task lifecycle state:
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/rdb/rdb.go#L82-L735>.
 ///
-/// TODO: Extend async broker coverage to retry, archive, recovery, and lease
-/// extension once those async lifecycle traits are introduced.
+/// TODO: Extend async broker coverage to recovery and lease extension once
+/// those async lifecycle traits are introduced.
 #[async_trait]
 pub trait AsyncRedisExecutor {
     async fn sadd(&mut self, key: &str, member: &str) -> Result<(), RedisExecutorError>;
