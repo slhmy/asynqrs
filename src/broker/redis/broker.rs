@@ -1,10 +1,10 @@
 use std::time::SystemTime;
 
 use crate::{
-    ArchiveBroker, ArchiveError, Broker, BrokerError, Clock, CompleteBroker, CompleteError,
-    DecodeTaskMessageError, DequeueBroker, DequeueError, DequeuedTask, EnqueuePlan, ForwardBroker,
-    ForwardError, LeaseBroker, LeaseError, LeaseExtension, RecoverBroker, RecoverError,
-    RecoverResult, RedisArchivePlan, RedisArchivePlanError, RedisCompletePlan,
+    ArchiveBroker, ArchiveError, AsyncRedisExecutor, Broker, BrokerError, Clock, CompleteBroker,
+    CompleteError, DecodeTaskMessageError, DequeueBroker, DequeueError, DequeuedTask, EnqueuePlan,
+    ForwardBroker, ForwardError, LeaseBroker, LeaseError, LeaseExtension, RecoverBroker,
+    RecoverError, RecoverResult, RedisArchivePlan, RedisArchivePlanError, RedisCompletePlan,
     RedisCompletePlanError, RedisDequeueCall, RedisDequeuePlan, RedisDequeuePlanError,
     RedisEnqueueOperation, RedisEnqueuePlan, RedisEnqueuePlanError, RedisExtendLeasePlan,
     RedisExtendLeasePlanError, RedisForwardPlan, RedisForwardPlanError, RedisRecoverPlan,
@@ -44,6 +44,12 @@ pub trait RedisExecutor {
 }
 
 #[derive(Debug, Clone)]
+pub struct AsyncRedisBroker<E, C = SystemClock> {
+    executor: E,
+    clock: C,
+}
+
+#[derive(Debug, Clone)]
 pub struct RedisBroker<E, C = SystemClock> {
     executor: E,
     clock: C,
@@ -78,6 +84,30 @@ impl<E> RedisBroker<E, SystemClock> {
     }
 }
 
+impl<E> AsyncRedisBroker<E, SystemClock> {
+    pub fn new(executor: E) -> Self {
+        Self::with_clock(executor, SystemClock)
+    }
+}
+
+impl<E, C> AsyncRedisBroker<E, C> {
+    pub fn with_clock(executor: E, clock: C) -> Self {
+        Self { executor, clock }
+    }
+
+    pub fn executor(&self) -> &E {
+        &self.executor
+    }
+
+    pub fn executor_mut(&mut self) -> &mut E {
+        &mut self.executor
+    }
+
+    pub fn into_executor(self) -> E {
+        self.executor
+    }
+}
+
 impl<E, C> RedisBroker<E, C> {
     pub fn with_clock(executor: E, clock: C) -> Self {
         Self { executor, clock }
@@ -93,6 +123,16 @@ impl<E, C> RedisBroker<E, C> {
 
     pub fn into_executor(self) -> E {
         self.executor
+    }
+}
+
+impl<E, C> AsyncRedisBroker<E, C>
+where
+    E: AsyncRedisExecutor,
+    C: Clock,
+{
+    pub async fn enqueue(&mut self, plan: &EnqueuePlan) -> Result<(), BrokerError> {
+        self.enqueue_with_now(plan, self.clock.now()).await
     }
 }
 
@@ -503,6 +543,51 @@ where
     }
 }
 
+impl<E, C> AsyncRedisBroker<E, C>
+where
+    E: AsyncRedisExecutor,
+{
+    pub async fn enqueue_with_now(
+        &mut self,
+        plan: &EnqueuePlan,
+        now: SystemTime,
+    ) -> Result<(), BrokerError> {
+        let redis_plan = RedisEnqueuePlan::from_enqueue_plan(plan, now)
+            .map_err(RedisBrokerError::Plan)
+            .map_err(BrokerError::from)?;
+
+        for operation in redis_plan.operations() {
+            self.execute(operation).await?;
+        }
+        Ok(())
+    }
+
+    async fn execute(&mut self, operation: &RedisEnqueueOperation) -> Result<(), BrokerError> {
+        match operation {
+            RedisEnqueueOperation::PublishQueue { key, queue } => {
+                self.executor
+                    .sadd(key, queue)
+                    .await
+                    .map_err(RedisBrokerError::Executor)
+                    .map_err(BrokerError::from)?;
+                Ok(())
+            }
+            RedisEnqueueOperation::EvalScript(call) => {
+                call.validate()
+                    .map_err(RedisBrokerError::ScriptCall)
+                    .map_err(BrokerError::from)?;
+                let result = self
+                    .executor
+                    .eval_script_int(call)
+                    .await
+                    .map_err(RedisBrokerError::Executor)
+                    .map_err(BrokerError::from)?;
+                map_script_result(call, result)
+            }
+        }
+    }
+}
+
 fn map_script_result(call: &RedisScriptCall, result: i64) -> Result<(), BrokerError> {
     match call.script().result_for_code(result) {
         Some(RedisScriptResult::Success) => Ok(()),
@@ -896,6 +981,7 @@ impl From<RedisBrokerError> for LeaseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use std::time::{Duration, UNIX_EPOCH};
 
     use crate::{RedisArg, Task, TaskOption, TaskState};
@@ -1049,6 +1135,50 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl AsyncRedisExecutor for FakeExecutor {
+        async fn sadd(&mut self, key: &str, member: &str) -> Result<(), RedisExecutorError> {
+            RedisExecutor::sadd(self, key, member)
+        }
+
+        async fn zadd_existing(
+            &mut self,
+            key: &str,
+            score: i64,
+            member: &str,
+        ) -> Result<usize, RedisExecutorError> {
+            RedisExecutor::zadd_existing(self, key, score, member)
+        }
+
+        async fn eval_script_int(
+            &mut self,
+            call: &RedisScriptCall,
+        ) -> Result<i64, RedisExecutorError> {
+            RedisExecutor::eval_script_int(self, call)
+        }
+
+        async fn eval_script_bytes(
+            &mut self,
+            call: &RedisDequeueCall,
+        ) -> Result<Option<Vec<u8>>, RedisExecutorError> {
+            RedisExecutor::eval_script_bytes(self, call)
+        }
+
+        async fn eval_script_byte_vec(
+            &mut self,
+            call: &RedisScriptCall,
+        ) -> Result<Vec<Vec<u8>>, RedisExecutorError> {
+            RedisExecutor::eval_script_byte_vec(self, call)
+        }
+
+        async fn eval_script_status(
+            &mut self,
+            call: &RedisScriptCall,
+        ) -> Result<String, RedisExecutorError> {
+            RedisExecutor::eval_script_status(self, call)
+        }
+    }
+
     #[test]
     fn executes_publish_then_enqueue_script() {
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -1085,6 +1215,76 @@ mod tests {
         assert!(matches!(args[0], RedisArg::Bytes(_)));
         assert_eq!(args[1], RedisArg::String("task-id".to_owned()));
         assert_eq!(args[2], RedisArg::I64(1_700_000_000_000_000_000));
+    }
+
+    #[tokio::test]
+    async fn async_broker_executes_publish_then_enqueue_script() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let task = Task::new_with_options(
+            "email:welcome",
+            b"payload".to_vec(),
+            [TaskOption::queue("critical")],
+        );
+        let plan = EnqueuePlan::from_task(&task, now, "task-id").unwrap();
+        let mut broker = AsyncRedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
+
+        broker.enqueue(&plan).await.unwrap();
+
+        let calls = &broker.executor().calls;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0],
+            ExecutorCall::Sadd {
+                key: "asynq:queues".to_owned(),
+                member: "critical".to_owned()
+            }
+        );
+        let ExecutorCall::EvalScriptInt { script, keys, args } = &calls[1] else {
+            panic!("expected script call");
+        };
+        assert_eq!(*script, RedisScript::Enqueue);
+        assert_eq!(
+            keys,
+            &[
+                "asynq:{critical}:t:task-id".to_owned(),
+                "asynq:{critical}:pending".to_owned(),
+            ]
+        );
+        assert!(matches!(args[0], RedisArg::Bytes(_)));
+        assert_eq!(args[1], RedisArg::String("task-id".to_owned()));
+        assert_eq!(args[2], RedisArg::I64(1_700_000_000_000_000_000));
+    }
+
+    #[tokio::test]
+    async fn async_broker_maps_task_id_conflict_result() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let task = Task::new("email:welcome", Vec::new());
+        let plan = EnqueuePlan::from_task(&task, now, "task-id").unwrap();
+        let executor = FakeExecutor {
+            script_int_results: vec![0],
+            ..FakeExecutor::default()
+        };
+        let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
+
+        let error = broker.enqueue(&plan).await.unwrap_err();
+
+        assert_eq!(error, BrokerError::TaskIdConflict);
+    }
+
+    #[tokio::test]
+    async fn async_broker_maps_executor_errors() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let task = Task::new("email:welcome", Vec::new());
+        let plan = EnqueuePlan::from_task(&task, now, "task-id").unwrap();
+        let executor = FakeExecutor {
+            sadd_error: Some(RedisExecutorError::new("connection closed")),
+            ..FakeExecutor::default()
+        };
+        let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
+
+        let error = broker.enqueue(&plan).await.unwrap_err();
+
+        assert_eq!(error, BrokerError::Other("connection closed".to_owned()));
     }
 
     #[test]
