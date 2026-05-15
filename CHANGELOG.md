@@ -2,6 +2,18 @@
 
 ## 2026-05-15
 
+- Added a minimal async worker processor with async broker traits, async
+  handler/error-handler traits, pre-handler async lease extension, retry,
+  archive, complete, idle, and maintenance paths.
+- Wired `AsyncRedisBroker` into the new async worker broker traits so it can be
+  used by `AsyncProcessor` and `AsyncServer`.
+- Covered async processor success, retry, archive, idle, lease-extension error,
+  and maintenance behavior with unit tests.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381
+- TODO: Add async handler panic capture, task timeout/deadline cancellation,
+  background lease extension, and shutdown requeue once the runtime semantics
+  are modeled.
+
 - Added async Redis broker lease extension and active-task requeue methods:
   `AsyncRedisBroker::extend_lease_with_now` and
   `AsyncRedisBroker::requeue_with_now`.

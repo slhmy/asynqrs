@@ -1,11 +1,13 @@
 use std::time::SystemTime;
 
 use crate::{
-    ArchiveError, AsyncRedisExecutor, BrokerError, Clock, CompleteError, DequeueError,
-    DequeuedTask, EnqueuePlan, ForwardError, LeaseError, LeaseExtension, RecoverError,
-    RecoverResult, RedisArchivePlan, RedisCompletePlan, RedisDequeuePlan, RedisEnqueueOperation,
-    RedisEnqueuePlan, RedisExtendLeasePlan, RedisForwardPlan, RedisRecoverPlan, RedisRequeuePlan,
-    RedisRetryPlan, RedisScript, RequeueError, RetryError, TaskMessage,
+    ArchiveError, AsyncArchiveBroker, AsyncCompleteBroker, AsyncDequeueBroker, AsyncForwardBroker,
+    AsyncLeaseBroker, AsyncRecoverBroker, AsyncRedisExecutor, AsyncRetryBroker, BrokerError, Clock,
+    CompleteError, DequeueError, DequeuedTask, EnqueuePlan, ForwardError, LeaseError,
+    LeaseExtension, RecoverError, RecoverResult, RedisArchivePlan, RedisCompletePlan,
+    RedisDequeuePlan, RedisEnqueueOperation, RedisEnqueuePlan, RedisExtendLeasePlan,
+    RedisForwardPlan, RedisRecoverPlan, RedisRequeuePlan, RedisRetryPlan, RedisScript,
+    RequeueError, RetryError, TaskMessage,
 };
 
 use super::{AsyncRedisBroker, RedisBrokerError, map_script_result};
@@ -17,6 +19,121 @@ where
 {
     pub async fn enqueue(&mut self, plan: &EnqueuePlan) -> Result<(), BrokerError> {
         self.enqueue_with_now(plan, self.clock.now()).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<E, C> AsyncDequeueBroker for AsyncRedisBroker<E, C>
+where
+    E: AsyncRedisExecutor + Send,
+    C: Clock + Send + Sync,
+{
+    async fn dequeue(&mut self, queues: &[String]) -> Result<DequeuedTask, DequeueError> {
+        self.dequeue_with_now(queues, self.clock.now()).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<E, C> AsyncCompleteBroker for AsyncRedisBroker<E, C>
+where
+    E: AsyncRedisExecutor + Send,
+    C: Clock + Send + Sync,
+{
+    async fn complete(&mut self, message: &TaskMessage) -> Result<(), CompleteError> {
+        self.complete_with_now(message, self.clock.now()).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<E, C> AsyncRetryBroker for AsyncRedisBroker<E, C>
+where
+    E: AsyncRedisExecutor + Send,
+    C: Clock + Send + Sync,
+{
+    async fn retry(
+        &mut self,
+        message: &TaskMessage,
+        retry_at: SystemTime,
+        error_message: &str,
+        is_failure: bool,
+    ) -> Result<(), RetryError> {
+        self.retry_with_now(
+            message,
+            self.clock.now(),
+            retry_at,
+            error_message,
+            is_failure,
+        )
+        .await
+    }
+}
+
+#[async_trait::async_trait]
+impl<E, C> AsyncArchiveBroker for AsyncRedisBroker<E, C>
+where
+    E: AsyncRedisExecutor + Send,
+    C: Clock + Send + Sync,
+{
+    async fn archive(
+        &mut self,
+        message: &TaskMessage,
+        archived_at: SystemTime,
+        error_message: &str,
+        is_failure: bool,
+    ) -> Result<(), ArchiveError> {
+        self.archive_with_now(
+            message,
+            self.clock.now(),
+            archived_at,
+            error_message,
+            is_failure,
+        )
+        .await
+    }
+}
+
+#[async_trait::async_trait]
+impl<E, C> AsyncLeaseBroker for AsyncRedisBroker<E, C>
+where
+    E: AsyncRedisExecutor + Send,
+    C: Clock + Send + Sync,
+{
+    async fn extend_lease(&mut self, queue: &str, task_id: &str) -> Result<(), LeaseError> {
+        self.extend_lease_with_now(queue, task_id, self.clock.now())
+            .await
+            .map(|_| ())
+    }
+}
+
+#[async_trait::async_trait]
+impl<E, C> AsyncForwardBroker for AsyncRedisBroker<E, C>
+where
+    E: AsyncRedisExecutor + Send,
+    C: Clock + Send + Sync,
+{
+    async fn forward_scheduled(&mut self, queue: &str) -> Result<usize, ForwardError> {
+        self.forward_with_now(queue, self.clock.now(), true).await
+    }
+
+    async fn forward_retry(&mut self, queue: &str) -> Result<usize, ForwardError> {
+        self.forward_with_now(queue, self.clock.now(), false).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<E, C> AsyncRecoverBroker for AsyncRedisBroker<E, C>
+where
+    E: AsyncRedisExecutor + Send,
+    C: Clock + Send + Sync,
+{
+    async fn recover_expired_leases(
+        &mut self,
+        queue: &str,
+        retry_at: SystemTime,
+        error_message: &str,
+    ) -> Result<RecoverResult, RecoverError> {
+        self.recover_expired_leases_with_now(queue, self.clock.now(), retry_at, error_message)
+            .await
     }
 }
 

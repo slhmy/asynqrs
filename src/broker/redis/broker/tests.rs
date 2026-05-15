@@ -3,10 +3,10 @@ use async_trait::async_trait;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
-    ArchiveBroker, ArchiveError, AsyncRedisExecutor, Broker, Clock, CompleteBroker, CompleteError,
-    DequeueBroker, DequeueError, EnqueuePlan, ForwardBroker, LeaseBroker, RecoverBroker, RedisArg,
-    RedisScript, RequeueBroker, RequeueError, RetryBroker, RetryError, Task, TaskMessage,
-    TaskOption, TaskState,
+    ArchiveBroker, ArchiveError, AsyncDequeueBroker, AsyncLeaseBroker, AsyncRedisExecutor, Broker,
+    Clock, CompleteBroker, CompleteError, DequeueBroker, DequeueError, EnqueuePlan, ForwardBroker,
+    LeaseBroker, RecoverBroker, RedisArg, RedisScript, RequeueBroker, RequeueError, RetryBroker,
+    RetryError, Task, TaskMessage, TaskOption, TaskState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -673,6 +673,44 @@ async fn async_broker_reports_missing_lease_without_creating_one() {
         extension.expires_at(),
         UNIX_EPOCH + Duration::from_secs(1_700_000_030)
     );
+}
+
+#[tokio::test]
+async fn async_broker_trait_extends_existing_lease() {
+    let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let mut broker = AsyncRedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
+
+    AsyncLeaseBroker::extend_lease(&mut broker, "critical", "task-id")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        broker.executor().calls,
+        [ExecutorCall::ZaddExisting {
+            key: "asynq:{critical}:lease".to_owned(),
+            score: 1_700_000_030,
+            member: "task-id".to_owned(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn async_broker_trait_dequeues_task() {
+    let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
+    msg.id = "task-id".to_owned();
+    msg.queue = "critical".to_owned();
+    let executor = FakeExecutor {
+        script_bytes_results: vec![Some(msg.encode_to_vec())],
+        ..FakeExecutor::default()
+    };
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
+
+    let dequeued = AsyncDequeueBroker::dequeue(&mut broker, &["critical".to_owned()])
+        .await
+        .unwrap();
+
+    assert_eq!(dequeued.message().id, "task-id");
 }
 
 #[test]

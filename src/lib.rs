@@ -1,4 +1,5 @@
 mod archive;
+mod async_processor;
 mod async_server;
 mod broker;
 mod client;
@@ -20,6 +21,12 @@ mod state;
 mod task;
 
 pub use archive::{ArchiveBroker, ArchiveError};
+pub use async_processor::{
+    AsyncArchiveBroker, AsyncCompleteBroker, AsyncDequeueBroker, AsyncErrorHandler,
+    AsyncExtendLeaseBeforeProcess, AsyncForwardBroker, AsyncHandler, AsyncLeaseBroker,
+    AsyncLeaseExtender, AsyncProcessor, AsyncRecoverBroker, AsyncRetryBroker,
+    NoopAsyncLeaseExtender,
+};
 pub use async_server::{
     AsyncServer, AsyncSleeper, AsyncWorkerProcessor, DEFAULT_ASYNC_SERVER_IDLE_SLEEP, TokioSleeper,
 };
