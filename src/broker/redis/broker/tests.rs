@@ -3,10 +3,11 @@ use async_trait::async_trait;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
-    ArchiveBroker, ArchiveError, AsyncDequeueBroker, AsyncLeaseBroker, AsyncRedisExecutor, Broker,
-    Clock, CompleteBroker, CompleteError, DequeueBroker, DequeueError, EnqueuePlan, ForwardBroker,
-    LeaseBroker, RecoverBroker, RedisArg, RedisScript, RequeueBroker, RequeueError, RetryBroker,
-    RetryError, Task, TaskMessage, TaskOption, TaskState,
+    ArchiveError, AsyncArchiveBroker, AsyncCompleteBroker, AsyncDequeueBroker,
+    AsyncForwardBroker, AsyncLeaseBroker, AsyncRecoverBroker, AsyncRedisExecutor,
+    AsyncRequeueBroker, AsyncRetryBroker, Clock, CompleteError, DequeueError, EnqueuePlan,
+    RedisArg, RedisDequeueCall, RedisScript, RequeueError, RetryError, Task, TaskMessage,
+    TaskOption, TaskState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,8 +72,9 @@ impl Default for FakeExecutor {
     }
 }
 
-impl RedisExecutor for FakeExecutor {
-    fn sadd(&mut self, key: &str, member: &str) -> Result<(), RedisExecutorError> {
+#[async_trait]
+impl AsyncRedisExecutor for FakeExecutor {
+    async fn sadd(&mut self, key: &str, member: &str) -> Result<(), RedisExecutorError> {
         self.calls.push(ExecutorCall::Sadd {
             key: key.to_owned(),
             member: member.to_owned(),
@@ -83,7 +85,7 @@ impl RedisExecutor for FakeExecutor {
         Ok(())
     }
 
-    fn zadd_existing(
+    async fn zadd_existing(
         &mut self,
         key: &str,
         score: i64,
@@ -100,7 +102,7 @@ impl RedisExecutor for FakeExecutor {
         Ok(self.zadd_existing_results.remove(0))
     }
 
-    fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, RedisExecutorError> {
+    async fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, RedisExecutorError> {
         self.calls.push(ExecutorCall::EvalScriptInt {
             script: call.script(),
             keys: call.keys().to_vec(),
@@ -112,7 +114,7 @@ impl RedisExecutor for FakeExecutor {
         Ok(self.script_int_results.remove(0))
     }
 
-    fn eval_script_bytes(
+    async fn eval_script_bytes(
         &mut self,
         call: &RedisDequeueCall,
     ) -> Result<Option<Vec<u8>>, RedisExecutorError> {
@@ -127,7 +129,7 @@ impl RedisExecutor for FakeExecutor {
         Ok(self.script_bytes_results.remove(0))
     }
 
-    fn eval_script_byte_vec(
+    async fn eval_script_byte_vec(
         &mut self,
         call: &RedisScriptCall,
     ) -> Result<Vec<Vec<u8>>, RedisExecutorError> {
@@ -142,7 +144,10 @@ impl RedisExecutor for FakeExecutor {
         Ok(self.script_byte_vec_results.remove(0))
     }
 
-    fn eval_script_status(&mut self, call: &RedisScriptCall) -> Result<String, RedisExecutorError> {
+    async fn eval_script_status(
+        &mut self,
+        call: &RedisScriptCall,
+    ) -> Result<String, RedisExecutorError> {
         self.calls.push(ExecutorCall::EvalScriptStatus {
             script: call.script(),
             keys: call.keys().to_vec(),
@@ -155,49 +160,8 @@ impl RedisExecutor for FakeExecutor {
     }
 }
 
-#[async_trait]
-impl AsyncRedisExecutor for FakeExecutor {
-    async fn sadd(&mut self, key: &str, member: &str) -> Result<(), RedisExecutorError> {
-        RedisExecutor::sadd(self, key, member)
-    }
-
-    async fn zadd_existing(
-        &mut self,
-        key: &str,
-        score: i64,
-        member: &str,
-    ) -> Result<usize, RedisExecutorError> {
-        RedisExecutor::zadd_existing(self, key, score, member)
-    }
-
-    async fn eval_script_int(&mut self, call: &RedisScriptCall) -> Result<i64, RedisExecutorError> {
-        RedisExecutor::eval_script_int(self, call)
-    }
-
-    async fn eval_script_bytes(
-        &mut self,
-        call: &RedisDequeueCall,
-    ) -> Result<Option<Vec<u8>>, RedisExecutorError> {
-        RedisExecutor::eval_script_bytes(self, call)
-    }
-
-    async fn eval_script_byte_vec(
-        &mut self,
-        call: &RedisScriptCall,
-    ) -> Result<Vec<Vec<u8>>, RedisExecutorError> {
-        RedisExecutor::eval_script_byte_vec(self, call)
-    }
-
-    async fn eval_script_status(
-        &mut self,
-        call: &RedisScriptCall,
-    ) -> Result<String, RedisExecutorError> {
-        RedisExecutor::eval_script_status(self, call)
-    }
-}
-
-#[test]
-fn executes_publish_then_enqueue_script() {
+#[tokio::test]
+async fn executes_publish_then_enqueue_script() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let task = Task::new_with_options(
         "email:welcome",
@@ -205,9 +169,9 @@ fn executes_publish_then_enqueue_script() {
         [TaskOption::queue("critical")],
     );
     let plan = EnqueuePlan::from_task(&task, now, "task-id").unwrap();
-    let mut broker = RedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
 
-    broker.enqueue(&plan).unwrap();
+    broker.enqueue(&plan).await.unwrap();
 
     let calls = &broker.executor().calls;
     assert_eq!(calls.len(), 2);
@@ -713,8 +677,8 @@ async fn async_broker_trait_dequeues_task() {
     assert_eq!(dequeued.message().id, "task-id");
 }
 
-#[test]
-fn executes_unique_scheduled_script() {
+#[tokio::test]
+async fn executes_unique_scheduled_script() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let task = Task::new_with_options(
         "email:welcome",
@@ -727,9 +691,9 @@ fn executes_unique_scheduled_script() {
     );
     let plan = EnqueuePlan::from_task(&task, now, "task-id").unwrap();
     assert_eq!(plan.state(), TaskState::Scheduled);
-    let mut broker = RedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
 
-    broker.enqueue(&plan).unwrap();
+    broker.enqueue(&plan).await.unwrap();
 
     let ExecutorCall::EvalScriptInt { script, keys, args } = &broker.executor().calls[1] else {
         panic!("expected script call");
@@ -749,8 +713,8 @@ fn executes_unique_scheduled_script() {
     assert!(matches!(args[3], RedisArg::Bytes(_)));
 }
 
-#[test]
-fn maps_unique_duplicate_result() {
+#[tokio::test]
+async fn maps_unique_duplicate_result() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let task = Task::new_with_options(
         "email:welcome",
@@ -762,15 +726,15 @@ fn maps_unique_duplicate_result() {
         script_int_results: vec![-1],
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
-    let error = broker.enqueue(&plan).unwrap_err();
+    let error = broker.enqueue(&plan).await.unwrap_err();
 
     assert_eq!(error, BrokerError::DuplicateTask);
 }
 
-#[test]
-fn maps_task_id_conflict_result() {
+#[tokio::test]
+async fn maps_task_id_conflict_result() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let task = Task::new("email:welcome", Vec::new());
     let plan = EnqueuePlan::from_task(&task, now, "task-id").unwrap();
@@ -778,15 +742,15 @@ fn maps_task_id_conflict_result() {
         script_int_results: vec![0],
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
-    let error = broker.enqueue(&plan).unwrap_err();
+    let error = broker.enqueue(&plan).await.unwrap_err();
 
     assert_eq!(error, BrokerError::TaskIdConflict);
 }
 
-#[test]
-fn maps_executor_errors() {
+#[tokio::test]
+async fn maps_executor_errors() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let task = Task::new("email:welcome", Vec::new());
     let plan = EnqueuePlan::from_task(&task, now, "task-id").unwrap();
@@ -794,15 +758,15 @@ fn maps_executor_errors() {
         sadd_error: Some(RedisExecutorError::new("connection closed")),
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
-    let error = broker.enqueue(&plan).unwrap_err();
+    let error = broker.enqueue(&plan).await.unwrap_err();
 
     assert_eq!(error, BrokerError::Other("connection closed".to_owned()));
 }
 
-#[test]
-fn dequeues_first_available_task() {
+#[tokio::test]
+async fn dequeues_first_available_task() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
     msg.id = "task-id".to_owned();
@@ -811,10 +775,11 @@ fn dequeues_first_available_task() {
         script_bytes_results: vec![None, Some(msg.encode_to_vec())],
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
     let task = broker
         .dequeue(&["empty".to_owned(), "critical".to_owned()])
+        .await
         .unwrap();
 
     assert_eq!(task.message(), &msg);
@@ -840,43 +805,43 @@ fn dequeues_first_available_task() {
     assert_eq!(args, &[RedisArg::I64(1_700_000_030)]);
 }
 
-#[test]
-fn dequeue_reports_no_processable_task() {
+#[tokio::test]
+async fn dequeue_reports_no_processable_task() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let executor = FakeExecutor {
         script_bytes_results: vec![None],
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
-    let error = broker.dequeue(&["critical".to_owned()]).unwrap_err();
+    let error = broker.dequeue(&["critical".to_owned()]).await.unwrap_err();
 
     assert_eq!(error, DequeueError::NoProcessableTask);
 }
 
-#[test]
-fn dequeue_maps_executor_errors() {
+#[tokio::test]
+async fn dequeue_maps_executor_errors() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let executor = FakeExecutor {
         script_error: Some(RedisExecutorError::new("connection closed")),
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
-    let error = broker.dequeue(&["critical".to_owned()]).unwrap_err();
+    let error = broker.dequeue(&["critical".to_owned()]).await.unwrap_err();
 
     assert_eq!(error, DequeueError::Other("connection closed".to_owned()));
 }
 
-#[test]
-fn completes_zero_retention_task_with_done_script() {
+#[tokio::test]
+async fn completes_zero_retention_task_with_done_script() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
     msg.id = "task-id".to_owned();
     msg.queue = "critical".to_owned();
-    let mut broker = RedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
 
-    broker.complete(&msg).unwrap();
+    broker.complete(&msg).await.unwrap();
 
     let calls = &broker.executor().calls;
     assert_eq!(calls.len(), 1);
@@ -897,16 +862,16 @@ fn completes_zero_retention_task_with_done_script() {
     assert_eq!(args[0], RedisArg::String("task-id".to_owned()));
 }
 
-#[test]
-fn completes_retained_task_with_mark_as_complete_script() {
+#[tokio::test]
+async fn completes_retained_task_with_mark_as_complete_script() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
     msg.id = "task-id".to_owned();
     msg.queue = "critical".to_owned();
     msg.retention = 300;
-    let mut broker = RedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
 
-    broker.complete(&msg).unwrap();
+    broker.complete(&msg).await.unwrap();
 
     let ExecutorCall::EvalScriptStatus { script, keys, args } = &broker.executor().calls[0] else {
         panic!("expected complete script call");
@@ -927,8 +892,8 @@ fn completes_retained_task_with_mark_as_complete_script() {
     assert!(matches!(args[3], RedisArg::Bytes(_)));
 }
 
-#[test]
-fn complete_maps_not_found_errors() {
+#[tokio::test]
+async fn complete_maps_not_found_errors() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
     msg.id = "task-id".to_owned();
@@ -937,24 +902,25 @@ fn complete_maps_not_found_errors() {
         script_error: Some(RedisExecutorError::new("redis eval error: NOT FOUND")),
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
-    let error = broker.complete(&msg).unwrap_err();
+    let error = broker.complete(&msg).await.unwrap_err();
 
     assert_eq!(error, CompleteError::NotFound);
 }
 
-#[test]
-fn retries_failed_task_with_retry_script() {
+#[tokio::test]
+async fn retries_failed_task_with_retry_script() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let retry_at = now + Duration::from_secs(60);
     let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
     msg.id = "task-id".to_owned();
     msg.queue = "critical".to_owned();
-    let mut broker = RedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
 
     broker
         .retry(&msg, retry_at, "handler failed", true)
+        .await
         .unwrap();
 
     let calls = &broker.executor().calls;
@@ -982,8 +948,8 @@ fn retries_failed_task_with_retry_script() {
     assert_eq!(args[4], RedisArg::String("1".to_owned()));
 }
 
-#[test]
-fn retry_maps_not_found_errors() {
+#[tokio::test]
+async fn retry_maps_not_found_errors() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
     msg.id = "task-id".to_owned();
@@ -992,25 +958,27 @@ fn retry_maps_not_found_errors() {
         script_error: Some(RedisExecutorError::new("redis eval error: NOT FOUND")),
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
     let error = broker
         .retry(&msg, now + Duration::from_secs(60), "handler failed", true)
+        .await
         .unwrap_err();
 
     assert_eq!(error, RetryError::NotFound);
 }
 
-#[test]
-fn archives_failed_task_with_archive_script() {
+#[tokio::test]
+async fn archives_failed_task_with_archive_script() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
     msg.id = "task-id".to_owned();
     msg.queue = "critical".to_owned();
-    let mut broker = RedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
 
     broker
         .archive(&msg, now, "max retry exhausted", true)
+        .await
         .unwrap();
 
     let calls = &broker.executor().calls;
@@ -1038,8 +1006,8 @@ fn archives_failed_task_with_archive_script() {
     assert_eq!(args[4], RedisArg::String("1".to_owned()));
 }
 
-#[test]
-fn archive_maps_not_found_errors() {
+#[tokio::test]
+async fn archive_maps_not_found_errors() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
     msg.id = "task-id".to_owned();
@@ -1048,24 +1016,25 @@ fn archive_maps_not_found_errors() {
         script_error: Some(RedisExecutorError::new("redis eval error: NOT FOUND")),
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
     let error = broker
         .archive(&msg, now, "max retry exhausted", true)
+        .await
         .unwrap_err();
 
     assert_eq!(error, ArchiveError::NotFound);
 }
 
-#[test]
-fn requeues_active_task_with_requeue_script() {
+#[tokio::test]
+async fn requeues_active_task_with_requeue_script() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
     msg.id = "task-id".to_owned();
     msg.queue = "critical".to_owned();
-    let mut broker = RedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
 
-    broker.requeue(&msg).unwrap();
+    broker.requeue(&msg).await.unwrap();
 
     let calls = &broker.executor().calls;
     assert_eq!(calls.len(), 1);
@@ -1085,8 +1054,8 @@ fn requeues_active_task_with_requeue_script() {
     assert_eq!(args, &[RedisArg::String("task-id".to_owned())]);
 }
 
-#[test]
-fn requeue_maps_not_found_errors() {
+#[tokio::test]
+async fn requeue_maps_not_found_errors() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut msg = TaskMessage::from_task(&Task::new("email:welcome", b"payload".to_vec()));
     msg.id = "task-id".to_owned();
@@ -1095,23 +1064,23 @@ fn requeue_maps_not_found_errors() {
         script_error: Some(RedisExecutorError::new("redis eval error: NOT FOUND")),
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
-    let error = broker.requeue(&msg).unwrap_err();
+    let error = broker.requeue(&msg).await.unwrap_err();
 
     assert_eq!(error, RequeueError::NotFound);
 }
 
-#[test]
-fn forwards_scheduled_tasks_with_forward_script() {
+#[tokio::test]
+async fn forwards_scheduled_tasks_with_forward_script() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let executor = FakeExecutor {
         script_int_results: vec![2],
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
-    let moved = broker.forward_scheduled("critical").unwrap();
+    let moved = broker.forward_scheduled("critical").await.unwrap();
 
     assert_eq!(moved, 2);
     let calls = &broker.executor().calls;
@@ -1132,16 +1101,16 @@ fn forwards_scheduled_tasks_with_forward_script() {
     assert_eq!(args[1], RedisArg::I64(1_700_000_000_000_000_000));
 }
 
-#[test]
-fn forwards_retry_tasks_with_forward_script() {
+#[tokio::test]
+async fn forwards_retry_tasks_with_forward_script() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let executor = FakeExecutor {
         script_int_results: vec![1],
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
-    let moved = broker.forward_retry("critical").unwrap();
+    let moved = broker.forward_retry("critical").await.unwrap();
 
     assert_eq!(moved, 1);
     let ExecutorCall::EvalScriptInt { script, keys, .. } = &broker.executor().calls[0] else {
@@ -1158,8 +1127,8 @@ fn forwards_retry_tasks_with_forward_script() {
     );
 }
 
-#[test]
-fn recovers_expired_leases_to_retry_or_archive() {
+#[tokio::test]
+async fn recovers_expired_leases_to_retry_or_archive() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let retry_at = now + Duration::from_secs(60);
     let mut retry_msg = TaskMessage::from_task(&Task::new("email:welcome", b"retry".to_vec()));
@@ -1177,10 +1146,11 @@ fn recovers_expired_leases_to_retry_or_archive() {
         script_status_results: vec!["OK".to_owned(), "OK".to_owned()],
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
     let result = broker
         .recover_expired_leases("critical", retry_at, "lease expired")
+        .await
         .unwrap();
 
     assert_eq!(result.retried(), 1);
@@ -1208,12 +1178,12 @@ fn recovers_expired_leases_to_retry_or_archive() {
     assert_eq!(*script, RedisScript::Archive);
 }
 
-#[test]
-fn extends_existing_lease() {
+#[tokio::test]
+async fn extends_existing_lease() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-    let mut broker = RedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
 
-    let extension = broker.extend_lease("critical", "task-id").unwrap();
+    let extension = broker.extend_lease_with_now("critical", "task-id", now).await.unwrap();
 
     assert_eq!(
         extension.expires_at(),
@@ -1229,16 +1199,16 @@ fn extends_existing_lease() {
     );
 }
 
-#[test]
-fn reports_missing_lease_without_creating_one() {
+#[tokio::test]
+async fn reports_missing_lease_without_creating_one() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let executor = FakeExecutor {
         zadd_existing_results: vec![0],
         ..FakeExecutor::default()
     };
-    let mut broker = RedisBroker::with_clock(executor, TestClock(now));
+    let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
-    let extension = broker.extend_lease("critical", "task-id").unwrap();
+    let extension = broker.extend_lease_with_now("critical", "task-id", now).await.unwrap();
 
     assert_eq!(
         extension.expires_at(),
