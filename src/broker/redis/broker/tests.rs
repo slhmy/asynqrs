@@ -3,11 +3,10 @@ use async_trait::async_trait;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
-    ArchiveError, AsyncArchiveBroker, AsyncCompleteBroker, AsyncDequeueBroker,
-    AsyncForwardBroker, AsyncLeaseBroker, AsyncRecoverBroker, AsyncRedisExecutor,
-    AsyncRequeueBroker, AsyncRetryBroker, Clock, CompleteError, DequeueError, EnqueuePlan,
-    RedisArg, RedisDequeueCall, RedisScript, RequeueError, RetryError, Task, TaskMessage,
-    TaskOption, TaskState,
+    ArchiveError, AsyncArchiveBroker, AsyncCompleteBroker, AsyncDequeueBroker, AsyncForwardBroker,
+    AsyncLeaseBroker, AsyncRecoverBroker, AsyncRedisExecutor, AsyncRequeueBroker, AsyncRetryBroker,
+    Clock, CompleteError, DequeueError, EnqueuePlan, RedisArg, RedisDequeueCall, RedisScript,
+    RequeueError, RetryError, Task, TaskMessage, TaskOption, TaskState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1183,7 +1182,10 @@ async fn extends_existing_lease() {
     let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let mut broker = AsyncRedisBroker::with_clock(FakeExecutor::default(), TestClock(now));
 
-    let extension = broker.extend_lease_with_now("critical", "task-id", now).await.unwrap();
+    let extension = broker
+        .extend_lease_with_now("critical", "task-id", now)
+        .await
+        .unwrap();
 
     assert_eq!(
         extension.expires_at(),
@@ -1208,7 +1210,10 @@ async fn reports_missing_lease_without_creating_one() {
     };
     let mut broker = AsyncRedisBroker::with_clock(executor, TestClock(now));
 
-    let extension = broker.extend_lease_with_now("critical", "task-id", now).await.unwrap();
+    let extension = broker
+        .extend_lease_with_now("critical", "task-id", now)
+        .await
+        .unwrap();
 
     assert_eq!(
         extension.expires_at(),

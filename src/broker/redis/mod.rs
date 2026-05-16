@@ -3,9 +3,7 @@ mod executor;
 mod plan;
 mod scripts;
 
-pub use broker::{
-    AsyncRedisBroker, RedisBrokerError, RedisExecutorError,
-};
+pub use broker::{AsyncRedisBroker, RedisBrokerError, RedisExecutorError};
 pub use executor::{AsyncRedisConnectionExecutor, AsyncRedisExecutor};
 pub use plan::{
     DEFAULT_LEASE_DURATION, RedisArchivePlan, RedisArchivePlanError, RedisArg, RedisCompletePlan,

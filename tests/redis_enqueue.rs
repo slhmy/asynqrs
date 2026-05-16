@@ -25,9 +25,7 @@ fn async_pending_enqueue_dequeue_and_complete_uses_redis_layout() {
     };
     tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(async_pending_enqueue_dequeue_and_complete_uses_redis_layout_inner(
-            &mut fixture,
-        ));
+        .block_on(async_pending_enqueue_dequeue_and_complete_uses_redis_layout_inner(&mut fixture));
 }
 
 async fn async_pending_enqueue_dequeue_and_complete_uses_redis_layout_inner(
@@ -94,9 +92,7 @@ fn async_retry_records_failure_and_moves_task_to_retry_set() {
     };
     tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(async_retry_records_failure_and_moves_task_to_retry_set_inner(
-            &mut fixture,
-        ));
+        .block_on(async_retry_records_failure_and_moves_task_to_retry_set_inner(&mut fixture));
 }
 
 async fn async_retry_records_failure_and_moves_task_to_retry_set_inner(fixture: &mut RedisFixture) {
@@ -145,9 +141,7 @@ fn async_server_with_redis_processor_completes_task_and_stops() {
     };
     tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(async_server_with_redis_processor_completes_task_and_stops_inner(
-            &mut fixture,
-        ));
+        .block_on(async_server_with_redis_processor_completes_task_and_stops_inner(&mut fixture));
 }
 
 async fn async_server_with_redis_processor_completes_task_and_stops_inner(
@@ -200,11 +194,9 @@ fn async_server_shutdown_requeues_in_flight_task() {
     let Some(mut fixture) = RedisFixture::new("async-server-requeue") else {
         return;
     };
-    tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(async_server_shutdown_requeues_in_flight_task_inner(
-            &mut fixture,
-        ));
+    tokio::runtime::Runtime::new().unwrap().block_on(
+        async_server_shutdown_requeues_in_flight_task_inner(&mut fixture),
+    );
 }
 
 async fn async_server_shutdown_requeues_in_flight_task_inner(fixture: &mut RedisFixture) {
@@ -306,8 +298,9 @@ impl RedisFixture {
 
     async fn enqueue(&self, task: &Task) -> EnqueueResult {
         let mut broker = self.async_broker().await;
-        let plan = EnqueuePlan::from_task(task, SystemTime::now(), uuid::Uuid::new_v4().to_string())
-            .unwrap();
+        let plan =
+            EnqueuePlan::from_task(task, SystemTime::now(), uuid::Uuid::new_v4().to_string())
+                .unwrap();
         broker.enqueue(&plan).await.unwrap();
         EnqueueResult::from_plan(&plan)
     }
@@ -382,7 +375,10 @@ async fn wait_for_state(fixture: &mut RedisFixture, task_id: &str, state: &str) 
         if !stored.is_empty() && string_field(&stored, "state") == state {
             return;
         }
-        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {state}");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {state}"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
