@@ -2,6 +2,17 @@
 
 ## 2026-05-16
 
+- Removed the synchronous worker/server and Redis broker implementation,
+  including `Server`, `Processor`, sync worker broker traits, `RedisBroker`,
+  and sync Redis executors; the worker runtime now exposes only the async
+  `AsyncServer`, `AsyncProcessor`, and `AsyncRedisBroker` paths.
+- Moved shared worker result/error types and retry/failure helpers onto the
+  async modules, and converted Redis-backed integration coverage to the async
+  broker/server API.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L663-L721
+- TODO: Add independent async forwarder/recoverer timers once async server
+  lifecycle configuration is modeled.
+
 - Added background async lease extension with
   `AsyncExtendLeaseWhileProcessing`, which extends active task leases on an
   interval while the async handler is running and stops when the handler
