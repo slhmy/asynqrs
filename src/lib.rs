@@ -1,6 +1,4 @@
 mod archive;
-mod async_processor;
-mod async_server;
 mod broker;
 mod client;
 mod complete;
@@ -12,25 +10,15 @@ mod lease;
 mod message;
 mod options;
 pub mod pb;
+mod processor;
 mod recover;
 mod requeue;
 mod retry;
+mod server;
 mod state;
 mod task;
 
 pub use archive::ArchiveError;
-pub use async_processor::{
-    AsyncArchiveBroker, AsyncCompleteBroker, AsyncDequeueBroker, AsyncErrorHandler,
-    AsyncExtendLeaseBeforeProcess, AsyncExtendLeaseWhileProcessing, AsyncForwardBroker,
-    AsyncHandler, AsyncLeaseBroker, AsyncLeaseExtender, AsyncProcessor, AsyncRecoverBroker,
-    AsyncRequeueBroker, AsyncRetryBroker, DefaultIsFailure, DefaultRetryDelay, HandlerError,
-    IsFailure, NoopAsyncLeaseExtender, NoopErrorHandler, ProcessorError, ProcessorRun, RetryDelay,
-};
-pub use async_server::{
-    AsyncServer, AsyncSleeper, AsyncWorkerProcessor, DEFAULT_ASYNC_SERVER_IDLE_SLEEP,
-    DEFAULT_ASYNC_SERVER_RECOVER_RETRY_DELAY, ServerError, ServerMaintenanceRun, ServerRunSummary,
-    TokioSleeper,
-};
 pub use broker::redis::{
     AsyncRedisBroker, AsyncRedisConnectionExecutor, AsyncRedisExecutor, DEFAULT_LEASE_DURATION,
     RedisArchivePlan, RedisArchivePlanError, RedisArg, RedisBrokerError, RedisCompletePlan,
@@ -52,8 +40,20 @@ pub use forward::ForwardError;
 pub use lease::{LeaseError, LeaseExtension};
 pub use message::{DecodeTaskMessageError, TaskMessage};
 pub use options::TaskOption;
+pub use processor::{
+    AsyncArchiveBroker, AsyncCompleteBroker, AsyncDequeueBroker, AsyncErrorHandler,
+    AsyncExtendLeaseBeforeProcess, AsyncExtendLeaseWhileProcessing, AsyncForwardBroker,
+    AsyncHandler, AsyncLeaseBroker, AsyncLeaseExtender, AsyncProcessor, AsyncRecoverBroker,
+    AsyncRequeueBroker, AsyncRetryBroker, DefaultIsFailure, DefaultRetryDelay, HandlerError,
+    IsFailure, NoopAsyncLeaseExtender, NoopErrorHandler, ProcessorError, ProcessorRun, RetryDelay,
+};
 pub use recover::{RecoverError, RecoverResult};
 pub use requeue::RequeueError;
 pub use retry::RetryError;
+pub use server::{
+    AsyncServer, AsyncSleeper, AsyncWorkerProcessor, DEFAULT_ASYNC_SERVER_IDLE_SLEEP,
+    DEFAULT_ASYNC_SERVER_RECOVER_RETRY_DELAY, ServerError, ServerMaintenanceRun, ServerRunSummary,
+    TokioSleeper,
+};
 pub use state::{ParseTaskStateError, TaskState};
 pub use task::Task;

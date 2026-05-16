@@ -2,6 +2,12 @@
 
 ## 2026-05-16
 
+- Renamed the async worker implementation files from `async_processor.rs` and
+  `async_server.rs` to `processor.rs` and `server.rs` now that the synchronous
+  implementation has been removed.
+- Reference: Rust-specific file-structure cleanup; Asynq behavior is unchanged.
+- No new TODOs.
+
 - Removed the synchronous worker/server and Redis broker implementation,
   including `Server`, `Processor`, sync worker broker traits, `RedisBroker`,
   and sync Redis executors; the worker runtime now exposes only the async
