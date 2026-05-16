@@ -15,14 +15,6 @@ pub struct DequeuedTask {
     lease_expires_at: SystemTime,
 }
 
-/// Minimal broker interface for the worker dequeue path.
-///
-/// Reference: Asynq v0.26.0 internal `base.Broker` worker-related methods:
-/// <https://github.com/hibiken/asynq/blob/v0.26.0/internal/base/base.go#L371-L419>.
-pub trait DequeueBroker {
-    fn dequeue(&mut self, queues: &[String]) -> Result<DequeuedTask, DequeueError>;
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DequeueError {
     #[error("no processable task found")]

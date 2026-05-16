@@ -3,12 +3,12 @@ use std::task::Poll;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use thiserror::Error;
 
 use crate::{
-    ArchiveError, AsyncWorkerProcessor, CompleteError, DEFAULT_SERVER_RECOVER_RETRY_DELAY,
-    DequeueError, DequeuedTask, ForwardError, HandlerError, IsFailure, LeaseError,
-    NoopErrorHandler, ProcessorError, ProcessorRun, RecoverError, RecoverResult, RequeueError,
-    RetryDelay, RetryError, ServerMaintenanceRun, SystemClock, Task, TaskMessage,
+    ArchiveError, AsyncWorkerProcessor, CompleteError, DEFAULT_ASYNC_SERVER_RECOVER_RETRY_DELAY,
+    DequeueError, DequeuedTask, ForwardError, LeaseError, RecoverError, RecoverResult,
+    RequeueError, RetryError, ServerMaintenanceRun, SystemClock, Task, TaskMessage,
 };
 
 /// Async minimal broker interface for the worker dequeue path.
@@ -103,6 +103,115 @@ pub trait AsyncRecoverBroker {
 #[async_trait]
 pub trait AsyncRequeueBroker {
     async fn requeue(&mut self, message: &TaskMessage) -> Result<(), RequeueError>;
+}
+
+/// Error returned by a task handler.
+///
+/// Reference: Asynq v0.26.0 `SkipRetry` and `RevokeTask` handler sentinel
+/// errors:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L327-L348>.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum HandlerError {
+    #[error("{0}")]
+    Failed(String),
+    #[error("{0}")]
+    SkipRetry(String),
+    #[error("{0}")]
+    RevokeTask(String),
+    #[error("{0}")]
+    Panic(String),
+}
+
+/// Calculates the delay before retrying a failed task.
+///
+/// Reference: Asynq v0.26.0 `RetryDelayFunc`:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L291-L297>.
+pub trait RetryDelay {
+    fn retry_delay(&mut self, retried: i32, error: &HandlerError, task: &Task) -> Duration;
+}
+
+impl<F> RetryDelay for F
+where
+    F: FnMut(i32, &HandlerError, &Task) -> Duration,
+{
+    fn retry_delay(&mut self, retried: i32, error: &HandlerError, task: &Task) -> Duration {
+        self(retried, error, task)
+    }
+}
+
+/// Determines whether a handler error counts as a failure in task statistics.
+///
+/// Reference: Asynq v0.26.0 `Config.IsFailure`:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L124-L130>.
+pub trait IsFailure {
+    fn is_failure(&mut self, error: &HandlerError) -> bool;
+}
+
+impl<F> IsFailure for F
+where
+    F: FnMut(&HandlerError) -> bool,
+{
+    fn is_failure(&mut self, error: &HandlerError) -> bool {
+        self(error)
+    }
+}
+
+/// Default exponential retry delay.
+///
+/// Reference: Asynq v0.26.0 `DefaultRetryDelayFunc` uses the Sidekiq-inspired
+/// formula `n^4 + 15 + rand(0..30) * (n + 1)` seconds:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L399-L405>.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultRetryDelay;
+
+/// Default failure predicate: every handler error counts as a failure.
+///
+/// Reference: Asynq v0.26.0 `defaultIsFailureFunc`:
+/// <https://github.com/hibiken/asynq/blob/v0.26.0/server.go#L407>.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultIsFailure;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopErrorHandler;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessorRun {
+    Completed {
+        task_id: String,
+    },
+    Retried {
+        task_id: String,
+        retry_at: SystemTime,
+    },
+    Archived {
+        task_id: String,
+    },
+    Revoked {
+        task_id: String,
+    },
+    NoProcessableTask,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ProcessorError {
+    #[error("failed to dequeue task: {0}")]
+    Dequeue(#[from] DequeueError),
+    #[error("failed to complete task: {0}")]
+    Complete(#[from] CompleteError),
+    #[error("failed to retry task: {0}")]
+    Retry(#[from] RetryError),
+    #[error("failed to archive task: {0}")]
+    Archive(#[from] ArchiveError),
+    #[error("failed to extend task lease: {0}")]
+    Lease(#[from] LeaseError),
+    #[error("failed to forward ready tasks: {0}")]
+    Forward(#[from] ForwardError),
+    #[error("failed to recover expired leases: {0}")]
+    Recover(#[from] RecoverError),
+    #[error("failed to requeue active task: {0}")]
+    Requeue(#[from] RequeueError),
+    #[error("{0} overflowed")]
+    TimeOverflow(&'static str),
 }
 
 /// Processes a single task on an async runtime.
@@ -255,9 +364,9 @@ where
 pub struct AsyncProcessor<
     B,
     H,
-    R = crate::DefaultRetryDelay,
+    R = DefaultRetryDelay,
     C = SystemClock,
-    I = crate::DefaultIsFailure,
+    I = DefaultIsFailure,
     E = NoopErrorHandler,
     L = NoopAsyncLeaseExtender,
 > {
@@ -271,9 +380,9 @@ pub struct AsyncProcessor<
     active_message: Option<TaskMessage>,
 }
 
-impl<B, H> AsyncProcessor<B, H, crate::DefaultRetryDelay, SystemClock> {
+impl<B, H> AsyncProcessor<B, H, DefaultRetryDelay, SystemClock> {
     pub fn new(broker: B, handler: H) -> Self {
-        Self::with_parts(broker, handler, crate::DefaultRetryDelay, SystemClock)
+        Self::with_parts(broker, handler, DefaultRetryDelay, SystemClock)
     }
 }
 
@@ -290,7 +399,7 @@ impl<B, H, R, C> AsyncProcessor<B, H, R, C> {
             handler,
             retry_delay,
             clock,
-            crate::DefaultIsFailure,
+            DefaultIsFailure,
             NoopErrorHandler,
             NoopAsyncLeaseExtender,
         )
@@ -534,7 +643,7 @@ where
         let retry_at = self
             .clock
             .now()
-            .checked_add(DEFAULT_SERVER_RECOVER_RETRY_DELAY)
+            .checked_add(DEFAULT_ASYNC_SERVER_RECOVER_RETRY_DELAY)
             .ok_or(ProcessorError::TimeOverflow("recovery retry time"))?;
 
         for queue in queues {
@@ -554,6 +663,44 @@ where
             recovered_retried,
             recovered_archived,
         ))
+    }
+}
+
+impl DefaultRetryDelay {
+    pub fn delay_for_retried_count(retried: i32) -> Duration {
+        let n = retried.max(0) as u64;
+        let jitter = rand::random_range(0..30_u64);
+        Duration::from_secs(
+            n.saturating_pow(4)
+                .saturating_add(15)
+                .saturating_add(jitter.saturating_mul(n.saturating_add(1))),
+        )
+    }
+}
+
+impl RetryDelay for DefaultRetryDelay {
+    fn retry_delay(&mut self, retried: i32, _error: &HandlerError, _task: &Task) -> Duration {
+        Self::delay_for_retried_count(retried)
+    }
+}
+
+impl IsFailure for DefaultIsFailure {
+    fn is_failure(&mut self, _error: &HandlerError) -> bool {
+        true
+    }
+}
+
+impl HandlerError {
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self::Failed(message.into())
+    }
+
+    pub fn skip_retry(message: impl Into<String>) -> Self {
+        Self::SkipRetry(message.into())
+    }
+
+    pub fn revoke_task(message: impl Into<String>) -> Self {
+        Self::RevokeTask(message.into())
     }
 }
 

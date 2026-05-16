@@ -2,11 +2,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use thiserror::Error;
 use tokio::sync::watch;
 
-use crate::{ProcessorError, ProcessorRun, ServerError, ServerMaintenanceRun, ServerRunSummary};
+use crate::{ProcessorError, ProcessorRun};
 
 pub const DEFAULT_ASYNC_SERVER_IDLE_SLEEP: Duration = Duration::from_secs(1);
+pub const DEFAULT_ASYNC_SERVER_RECOVER_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 /// Minimal Tokio-native worker server loop.
 ///
@@ -47,6 +49,42 @@ pub trait AsyncWorkerProcessor {
     async fn shutdown(&mut self) -> Result<(), ProcessorError> {
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerRunSummary {
+    processed: usize,
+    completed: usize,
+    retried: usize,
+    archived: usize,
+    revoked: usize,
+    idle_polls: usize,
+    forwarded_scheduled: usize,
+    forwarded_retry: usize,
+    recovered_retried: usize,
+    recovered_archived: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerMaintenanceRun {
+    forwarded_scheduled: usize,
+    forwarded_retry: usize,
+    recovered_retried: usize,
+    recovered_archived: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ServerError {
+    #[error("server requires at least one queue")]
+    EmptyQueueList,
+    #[error("queue name must contain one or more characters")]
+    EmptyQueueName,
+    #[error("server requires at least one worker")]
+    EmptyWorkerCount,
+    #[error("server worker task panicked")]
+    WorkerThreadPanicked,
+    #[error("processor failed: {0}")]
+    Processor(ProcessorError),
 }
 
 impl<P> AsyncServer<P, TokioSleeper> {
@@ -125,6 +163,128 @@ where
             &mut shutdown,
         )
         .await
+    }
+}
+
+impl ServerRunSummary {
+    pub fn processed(&self) -> usize {
+        self.processed
+    }
+
+    pub fn completed(&self) -> usize {
+        self.completed
+    }
+
+    pub fn retried(&self) -> usize {
+        self.retried
+    }
+
+    pub fn archived(&self) -> usize {
+        self.archived
+    }
+
+    pub fn revoked(&self) -> usize {
+        self.revoked
+    }
+
+    pub fn idle_polls(&self) -> usize {
+        self.idle_polls
+    }
+
+    pub fn forwarded_scheduled(&self) -> usize {
+        self.forwarded_scheduled
+    }
+
+    pub fn forwarded_retry(&self) -> usize {
+        self.forwarded_retry
+    }
+
+    pub fn recovered_retried(&self) -> usize {
+        self.recovered_retried
+    }
+
+    pub fn recovered_archived(&self) -> usize {
+        self.recovered_archived
+    }
+
+    pub(crate) fn record(&mut self, result: ProcessorRun) {
+        self.processed += 1;
+        match result {
+            ProcessorRun::Completed { .. } => self.completed += 1,
+            ProcessorRun::Retried { .. } => self.retried += 1,
+            ProcessorRun::Archived { .. } => self.archived += 1,
+            ProcessorRun::Revoked { .. } => self.revoked += 1,
+            ProcessorRun::NoProcessableTask => self.idle_polls += 1,
+        }
+    }
+
+    pub(crate) fn record_idle_poll(&mut self) {
+        self.idle_polls += 1;
+    }
+
+    pub(crate) fn record_maintenance(&mut self, result: ServerMaintenanceRun) {
+        self.forwarded_scheduled += result.forwarded_scheduled;
+        self.forwarded_retry += result.forwarded_retry;
+        self.recovered_retried += result.recovered_retried;
+        self.recovered_archived += result.recovered_archived;
+    }
+
+    pub(crate) fn merge(&mut self, other: ServerRunSummary) {
+        self.processed += other.processed;
+        self.completed += other.completed;
+        self.retried += other.retried;
+        self.archived += other.archived;
+        self.revoked += other.revoked;
+        self.idle_polls += other.idle_polls;
+        self.forwarded_scheduled += other.forwarded_scheduled;
+        self.forwarded_retry += other.forwarded_retry;
+        self.recovered_retried += other.recovered_retried;
+        self.recovered_archived += other.recovered_archived;
+    }
+}
+
+impl ServerMaintenanceRun {
+    pub fn new(
+        forwarded_scheduled: usize,
+        forwarded_retry: usize,
+        recovered_retried: usize,
+        recovered_archived: usize,
+    ) -> Self {
+        Self {
+            forwarded_scheduled,
+            forwarded_retry,
+            recovered_retried,
+            recovered_archived,
+        }
+    }
+
+    pub fn forwarded_scheduled(&self) -> usize {
+        self.forwarded_scheduled
+    }
+
+    pub fn forwarded_retry(&self) -> usize {
+        self.forwarded_retry
+    }
+
+    pub fn recovered_retried(&self) -> usize {
+        self.recovered_retried
+    }
+
+    pub fn recovered_archived(&self) -> usize {
+        self.recovered_archived
+    }
+
+    pub fn total(&self) -> usize {
+        self.forwarded_scheduled
+            + self.forwarded_retry
+            + self.recovered_retried
+            + self.recovered_archived
+    }
+}
+
+impl From<ProcessorError> for ServerError {
+    fn from(error: ProcessorError) -> Self {
+        Self::Processor(error)
     }
 }
 
