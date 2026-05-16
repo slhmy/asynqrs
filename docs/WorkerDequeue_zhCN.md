@@ -215,9 +215,14 @@ hook；`AsyncProcessor` 会通过 `AsyncRequeueBroker::requeue` 把这个 active
 payload 映射成 `HandlerError::Panic`，然后复用普通 handler failure 的
 retry/archive 路径处理任务。
 
-当前 background lease extender、timeout/deadline cancellation，以及和上游一样
-独立定时运行的 forwarder/recoverer 间隔还没有迁到 async；这些会沿着
-`AsyncServer` / `AsyncRedisBroker` 的边界继续推进。
+`AsyncProcessor` 会根据 `TaskMessage.timeout` 和 `TaskMessage.deadline`
+计算任务执行截止时间；两者同时存在时取更早的时间。handler 超时或 deadline
+已经过期时，会以 `context deadline exceeded` 作为 handler failure，继续走
+retry/archive 路径。
+
+当前 background lease extender，以及和上游一样独立定时运行的
+forwarder/recoverer 间隔还没有迁到 async；这些会沿着 `AsyncServer` /
+`AsyncRedisBroker` 的边界继续推进。
 
 ## Dequeue
 
@@ -491,7 +496,7 @@ CI 会通过 Redis service 设置 `ASYNQ_RS_REDIS_URL`，因此会连接真实 R
 ## 还没实现的部分
 
 - worker 并发池。
-- task context timeout/deadline。
+- background async lease extender。
 - worker-side lease extender 定时循环。
 - shutdown requeue。
 - server-side recoverer 独立定时循环和上游 clock-skew cutoff。

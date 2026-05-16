@@ -1,6 +1,6 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::task::Poll;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
@@ -197,8 +197,8 @@ where
 /// Reference: Asynq v0.26.0 processor success/failure routing:
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381>.
 ///
-/// TODO: Add task context timeout/deadline handling and background lease
-/// extension once the async runtime semantics are modeled.
+/// TODO: Add background lease extension once the async runtime semantics are
+/// modeled.
 #[derive(Debug, Clone)]
 pub struct AsyncProcessor<
     B,
@@ -341,6 +341,8 @@ where
 
         let message = dequeued.message().clone();
         let task = task_from_message(&message);
+        let now = self.clock.now();
+        let deadline = task_deadline(&message, now)?;
         self.active_message = Some(message.clone());
         if let Err(error) = self
             .lease_extender
@@ -350,7 +352,7 @@ where
             self.active_message = None;
             return Err(error.into());
         }
-        let result = match perform(&mut self.handler, &task).await {
+        let result = match perform(&mut self.handler, &task, deadline, now).await {
             Ok(()) => match self.broker.complete(&message).await {
                 Ok(()) => Ok(ProcessorRun::Completed {
                     task_id: message.id,
@@ -535,13 +537,22 @@ fn task_from_message(message: &TaskMessage) -> Task {
     )
 }
 
-async fn perform<H>(handler: &mut H, task: &Task) -> Result<(), HandlerError>
+async fn perform<H>(
+    handler: &mut H,
+    task: &Task,
+    deadline: Option<SystemTime>,
+    now: SystemTime,
+) -> Result<(), HandlerError>
 where
     H: AsyncHandler,
 {
+    if deadline.is_some_and(|deadline| deadline <= now) {
+        return Err(HandlerError::failed("context deadline exceeded"));
+    }
+
     let future = handler.process_task(task);
     tokio::pin!(future);
-    std::future::poll_fn(|cx| {
+    let caught = std::future::poll_fn(|cx| {
         catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))).unwrap_or_else(|panic| {
             let message = if let Some(message) = panic.downcast_ref::<&str>() {
                 (*message).to_owned()
@@ -552,8 +563,59 @@ where
             };
             Poll::Ready(Err(HandlerError::Panic(message)))
         })
+    });
+
+    match deadline.and_then(|deadline| tokio_instant_for_system_time(deadline, now)) {
+        Some(deadline) => tokio::time::timeout_at(deadline, caught)
+            .await
+            .unwrap_or_else(|_| Err(HandlerError::failed("context deadline exceeded"))),
+        None => caught.await,
+    }
+}
+
+fn task_deadline(
+    message: &TaskMessage,
+    now: SystemTime,
+) -> Result<Option<SystemTime>, ProcessorError> {
+    let timeout_deadline = if message.timeout > 0 {
+        let timeout = Duration::from_secs(message.timeout as u64);
+        Some(
+            now.checked_add(timeout)
+                .ok_or(ProcessorError::TimeOverflow("task timeout deadline"))?,
+        )
+    } else {
+        None
+    };
+    let explicit_deadline = if message.deadline != 0 {
+        Some(system_time_from_unix_seconds(message.deadline))
+    } else {
+        None
+    };
+
+    Ok(match (timeout_deadline, explicit_deadline) {
+        (Some(timeout), Some(deadline)) => Some(timeout.min(deadline)),
+        (Some(timeout), None) => Some(timeout),
+        (None, Some(deadline)) => Some(deadline),
+        (None, None) => None,
     })
-    .await
+}
+
+fn system_time_from_unix_seconds(seconds: i64) -> SystemTime {
+    if seconds >= 0 {
+        UNIX_EPOCH + Duration::from_secs(seconds as u64)
+    } else {
+        UNIX_EPOCH - Duration::from_secs(seconds.unsigned_abs())
+    }
+}
+
+fn tokio_instant_for_system_time(
+    deadline: SystemTime,
+    now: SystemTime,
+) -> Option<tokio::time::Instant> {
+    match deadline.duration_since(now) {
+        Ok(duration) => tokio::time::Instant::now().checked_add(duration),
+        Err(_) => Some(tokio::time::Instant::now()),
+    }
 }
 
 #[cfg(test)]
@@ -562,6 +624,10 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use crate::{Clock, DefaultIsFailure, DefaultRetryDelay};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[derive(Debug, Default)]
     struct RecordingAsyncBroker {
@@ -905,6 +971,138 @@ mod tests {
             )]
         );
         assert!(processor.broker().archived.is_empty());
+    }
+
+    #[tokio::test]
+    async fn task_timeout_retries_when_handler_exceeds_timeout() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut message = message("task-id");
+        message.timeout = 1;
+        let broker = RecordingAsyncBroker {
+            dequeued: vec![Ok(dequeued(message))],
+            ..RecordingAsyncBroker::default()
+        };
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let mut processor = AsyncProcessor::with_parts(
+            broker,
+            PendingAsyncHandler {
+                calls: Arc::clone(&handler_calls),
+            },
+            |_retried, _error: &HandlerError, _task: &Task| Duration::from_secs(60),
+            TestClock(now),
+        );
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            processor.run_once(&["critical".to_owned()]),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            result,
+            ProcessorRun::Retried {
+                task_id: "task-id".to_owned(),
+                retry_at: now + Duration::from_secs(60),
+            }
+        );
+        assert_eq!(
+            processor.broker().retried,
+            [(
+                "task-id".to_owned(),
+                now + Duration::from_secs(60),
+                "context deadline exceeded".to_owned(),
+                true
+            )]
+        );
+        assert_eq!(handler_calls.load(Ordering::Relaxed), 1);
+        assert!(processor.broker().completed.is_empty());
+        assert!(processor.broker().archived.is_empty());
+    }
+
+    #[tokio::test]
+    async fn expired_deadline_retries_without_calling_handler() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut message = message("task-id");
+        message.deadline = 1_699_999_999;
+        let broker = RecordingAsyncBroker {
+            dequeued: vec![Ok(dequeued(message))],
+            ..RecordingAsyncBroker::default()
+        };
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&handler_calls);
+        let mut processor = AsyncProcessor::with_parts(
+            broker,
+            move |_task: &Task| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok::<(), HandlerError>(())
+            },
+            |_retried, _error: &HandlerError, _task: &Task| Duration::from_secs(60),
+            TestClock(now),
+        );
+
+        let result = processor.run_once(&["critical".to_owned()]).await.unwrap();
+
+        assert_eq!(
+            result,
+            ProcessorRun::Retried {
+                task_id: "task-id".to_owned(),
+                retry_at: now + Duration::from_secs(60),
+            }
+        );
+        assert_eq!(handler_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(processor.broker().retried[0].2, "context deadline exceeded");
+    }
+
+    #[tokio::test]
+    async fn timeout_and_deadline_use_earliest_deadline() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut message = message("task-id");
+        message.timeout = 60;
+        message.deadline = 1_700_000_001;
+        let broker = RecordingAsyncBroker {
+            dequeued: vec![Ok(dequeued(message))],
+            ..RecordingAsyncBroker::default()
+        };
+        let mut processor = AsyncProcessor::with_parts(
+            broker,
+            PendingAsyncHandler {
+                calls: Arc::new(AtomicUsize::new(0)),
+            },
+            |_retried, _error: &HandlerError, _task: &Task| Duration::from_secs(60),
+            TestClock(now),
+        );
+
+        let queues = ["critical".to_owned()];
+        let result = {
+            let result = processor.run_once(&queues);
+            tokio::pin!(result);
+            tokio::task::yield_now().await;
+            result.await.unwrap()
+        };
+
+        assert_eq!(
+            result,
+            ProcessorRun::Retried {
+                task_id: "task-id".to_owned(),
+                retry_at: now + Duration::from_secs(60),
+            }
+        );
+        assert_eq!(processor.broker().retried[0].2, "context deadline exceeded");
+    }
+
+    struct PendingAsyncHandler {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AsyncHandler for PendingAsyncHandler {
+        async fn process_task(&mut self, _task: &Task) -> Result<(), HandlerError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            std::future::pending::<()>().await;
+            Ok(())
+        }
     }
 
     #[tokio::test]
