@@ -23,9 +23,9 @@ mod task;
 pub use archive::{ArchiveBroker, ArchiveError};
 pub use async_processor::{
     AsyncArchiveBroker, AsyncCompleteBroker, AsyncDequeueBroker, AsyncErrorHandler,
-    AsyncExtendLeaseBeforeProcess, AsyncForwardBroker, AsyncHandler, AsyncLeaseBroker,
-    AsyncLeaseExtender, AsyncProcessor, AsyncRecoverBroker, AsyncRequeueBroker, AsyncRetryBroker,
-    NoopAsyncLeaseExtender,
+    AsyncExtendLeaseBeforeProcess, AsyncExtendLeaseWhileProcessing, AsyncForwardBroker,
+    AsyncHandler, AsyncLeaseBroker, AsyncLeaseExtender, AsyncProcessor, AsyncRecoverBroker,
+    AsyncRequeueBroker, AsyncRetryBroker, NoopAsyncLeaseExtender,
 };
 pub use async_server::{
     AsyncServer, AsyncSleeper, AsyncWorkerProcessor, DEFAULT_ASYNC_SERVER_IDLE_SLEEP, TokioSleeper,

@@ -220,9 +220,13 @@ retry/archive 路径处理任务。
 已经过期时，会以 `context deadline exceeded` 作为 handler failure，继续走
 retry/archive 路径。
 
-当前 background lease extender，以及和上游一样独立定时运行的
-forwarder/recoverer 间隔还没有迁到 async；这些会沿着 `AsyncServer` /
-`AsyncRedisBroker` 的边界继续推进。
+`AsyncExtendLeaseWhileProcessing` 可以在 async handler 运行期间按固定间隔调用
+`AsyncLeaseBroker::extend_lease`，handler 返回、失败、panic、timeout 或 lease
+extension 失败时都会停止后台续约。lease extension 失败会作为
+`ProcessorError::Lease` 返回，并中断当前任务处理。
+
+当前和上游一样独立定时运行的 forwarder/recoverer 间隔还没有迁到 async；这些
+会沿着 `AsyncServer` / `AsyncRedisBroker` 的边界继续推进。
 
 ## Dequeue
 
@@ -496,7 +500,7 @@ CI 会通过 Redis service 设置 `ASYNQ_RS_REDIS_URL`，因此会连接真实 R
 ## 还没实现的部分
 
 - worker 并发池。
-- background async lease extender。
+- async forwarder/recoverer 独立轮询间隔。
 - worker-side lease extender 定时循环。
 - shutdown requeue。
 - server-side recoverer 独立定时循环和上游 clock-skew cutoff。

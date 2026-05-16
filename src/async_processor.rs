@@ -145,15 +145,17 @@ pub struct NoopAsyncLeaseExtender;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AsyncExtendLeaseBeforeProcess;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AsyncExtendLeaseWhileProcessing {
+    interval: Duration,
+}
+
 /// Extends or starts lease extension for a dequeued task before handler
 /// execution.
 ///
 /// Reference: Asynq v0.26.0 starts a lease extender goroutine around task
 /// processing:
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381>.
-///
-/// TODO: Replace this pre-handler hook with a background async lease extender
-/// loop once task cancellation and separate broker handles are modeled.
 #[async_trait]
 pub trait AsyncLeaseExtender<B> {
     async fn before_process(
@@ -161,6 +163,18 @@ pub trait AsyncLeaseExtender<B> {
         broker: &mut B,
         message: &TaskMessage,
     ) -> Result<(), LeaseError>;
+
+    fn during_process_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    async fn during_process(
+        &mut self,
+        _broker: &mut B,
+        _message: &TaskMessage,
+    ) -> Result<(), LeaseError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -191,14 +205,52 @@ where
     }
 }
 
+impl AsyncExtendLeaseWhileProcessing {
+    pub fn every(interval: Duration) -> Self {
+        Self { interval }
+    }
+
+    pub fn interval(&self) -> Duration {
+        self.interval
+    }
+}
+
+#[async_trait]
+impl<B> AsyncLeaseExtender<B> for AsyncExtendLeaseWhileProcessing
+where
+    B: AsyncLeaseBroker + Send,
+{
+    async fn before_process(
+        &mut self,
+        _broker: &mut B,
+        _message: &TaskMessage,
+    ) -> Result<(), LeaseError> {
+        Ok(())
+    }
+
+    fn during_process_interval(&self) -> Option<Duration> {
+        if self.interval.is_zero() {
+            None
+        } else {
+            Some(self.interval)
+        }
+    }
+
+    async fn during_process(
+        &mut self,
+        broker: &mut B,
+        message: &TaskMessage,
+    ) -> Result<(), LeaseError> {
+        broker.extend_lease(&message.queue, &message.id).await
+    }
+}
+
 /// Minimal async worker-side processor that runs one dequeued task through a
 /// handler and then marks it complete, retry, archive, or done.
 ///
 /// Reference: Asynq v0.26.0 processor success/failure routing:
 /// <https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381>.
 ///
-/// TODO: Add background lease extension once the async runtime semantics are
-/// modeled.
 #[derive(Debug, Clone)]
 pub struct AsyncProcessor<
     B,
@@ -352,7 +404,17 @@ where
             self.active_message = None;
             return Err(error.into());
         }
-        let result = match perform(&mut self.handler, &task, deadline, now).await {
+        let handler_result = perform_with_lease_extender(
+            &mut self.handler,
+            &mut self.lease_extender,
+            &mut self.broker,
+            &message,
+            &task,
+            deadline,
+            now,
+        )
+        .await?;
+        let result = match handler_result {
             Ok(()) => match self.broker.complete(&message).await {
                 Ok(()) => Ok(ProcessorRun::Completed {
                     task_id: message.id,
@@ -570,6 +632,43 @@ where
             .await
             .unwrap_or_else(|_| Err(HandlerError::failed("context deadline exceeded"))),
         None => caught.await,
+    }
+}
+
+async fn perform_with_lease_extender<H, L, B>(
+    handler: &mut H,
+    lease_extender: &mut L,
+    broker: &mut B,
+    message: &TaskMessage,
+    task: &Task,
+    deadline: Option<SystemTime>,
+    now: SystemTime,
+) -> Result<Result<(), HandlerError>, ProcessorError>
+where
+    H: AsyncHandler + Send,
+    L: AsyncLeaseExtender<B> + Send,
+    B: Send,
+{
+    let Some(interval) = lease_extender.during_process_interval() else {
+        return Ok(perform(handler, task, deadline, now).await);
+    };
+
+    if deadline.is_some_and(|deadline| deadline <= now) {
+        return Ok(Err(HandlerError::failed("context deadline exceeded")));
+    }
+
+    let handler = perform(handler, task, deadline, now);
+    tokio::pin!(handler);
+    let mut lease_interval = tokio::time::interval(interval);
+    lease_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            result = &mut handler => return Ok(result),
+            _ = lease_interval.tick() => {
+                lease_extender.during_process(broker, message).await?;
+            }
+        }
     }
 }
 
@@ -903,6 +1002,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn background_lease_extender_runs_while_handler_is_processing() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let message = message("task-id");
+        let broker = RecordingAsyncBroker {
+            dequeued: vec![Ok(dequeued(message))],
+            ..RecordingAsyncBroker::default()
+        };
+        let mut processor = AsyncProcessor::with_parts_hooks_and_lease_extender(
+            broker,
+            SleepingAsyncHandler {
+                duration: Duration::from_millis(20),
+            },
+            DefaultRetryDelay,
+            TestClock(now),
+            DefaultIsFailure,
+            NoopErrorHandler,
+            AsyncExtendLeaseWhileProcessing::every(Duration::from_millis(5)),
+        );
+
+        let result = processor.run_once(&["critical".to_owned()]).await.unwrap();
+
+        assert_eq!(
+            result,
+            ProcessorRun::Completed {
+                task_id: "task-id".to_owned()
+            }
+        );
+        assert!(processor.broker().lease_extensions.len() >= 2);
+        assert!(
+            processor
+                .broker()
+                .lease_extensions
+                .iter()
+                .all(|extension| extension == &("critical".to_owned(), "task-id".to_owned()))
+        );
+    }
+
+    #[tokio::test]
+    async fn background_lease_extension_stops_after_handler_returns() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let message = message("task-id");
+        let broker = RecordingAsyncBroker {
+            dequeued: vec![Ok(dequeued(message))],
+            ..RecordingAsyncBroker::default()
+        };
+        let mut processor = AsyncProcessor::with_parts_hooks_and_lease_extender(
+            broker,
+            |_task: &Task| Ok::<(), HandlerError>(()),
+            DefaultRetryDelay,
+            TestClock(now),
+            DefaultIsFailure,
+            NoopErrorHandler,
+            AsyncExtendLeaseWhileProcessing::every(Duration::from_millis(5)),
+        );
+
+        let result = processor.run_once(&["critical".to_owned()]).await.unwrap();
+        let extensions_after_return = processor.broker().lease_extensions.len();
+        tokio::time::sleep(Duration::from_millis(15)).await;
+
+        assert_eq!(
+            result,
+            ProcessorRun::Completed {
+                task_id: "task-id".to_owned()
+            }
+        );
+        assert_eq!(
+            processor.broker().lease_extensions.len(),
+            extensions_after_return
+        );
+    }
+
+    #[tokio::test]
+    async fn background_lease_extension_error_stops_processing() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let message = message("task-id");
+        let broker = RecordingAsyncBroker {
+            dequeued: vec![Ok(dequeued(message))],
+            extend_lease_error: Some(LeaseError::Other("lease failed".to_owned())),
+            ..RecordingAsyncBroker::default()
+        };
+        let mut processor = AsyncProcessor::with_parts_hooks_and_lease_extender(
+            broker,
+            PendingAsyncHandler {
+                calls: Arc::new(AtomicUsize::new(0)),
+            },
+            DefaultRetryDelay,
+            TestClock(now),
+            DefaultIsFailure,
+            NoopErrorHandler,
+            AsyncExtendLeaseWhileProcessing::every(Duration::from_millis(5)),
+        );
+
+        let error = processor
+            .run_once(&["critical".to_owned()])
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            ProcessorError::Lease(LeaseError::Other("lease failed".to_owned()))
+        );
+        assert!(processor.broker().completed.is_empty());
+        assert!(processor.broker().retried.is_empty());
+        assert!(processor.broker().archived.is_empty());
+        assert_eq!(
+            processor.broker().lease_extensions,
+            [("critical".to_owned(), "task-id".to_owned())]
+        );
+    }
+
+    #[tokio::test]
     async fn shutdown_requeues_active_task() {
         let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         let broker = RecordingAsyncBroker::default();
@@ -1101,6 +1311,18 @@ mod tests {
         async fn process_task(&mut self, _task: &Task) -> Result<(), HandlerError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             std::future::pending::<()>().await;
+            Ok(())
+        }
+    }
+
+    struct SleepingAsyncHandler {
+        duration: Duration,
+    }
+
+    #[async_trait]
+    impl AsyncHandler for SleepingAsyncHandler {
+        async fn process_task(&mut self, _task: &Task) -> Result<(), HandlerError> {
+            tokio::time::sleep(self.duration).await;
             Ok(())
         }
     }

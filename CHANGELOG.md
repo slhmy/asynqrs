@@ -2,6 +2,18 @@
 
 ## 2026-05-16
 
+- Added background async lease extension with
+  `AsyncExtendLeaseWhileProcessing`, which extends active task leases on an
+  interval while the async handler is running and stops when the handler
+  returns, fails, panics, times out, or lease extension fails.
+- Covered background async lease extension with unit tests for repeated
+  extension during processing, stopping after handler completion, and
+  propagating lease-extension errors as `ProcessorError::Lease`.
+- Reference: https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381
+- TODO: Add upstream-style lease extension intervals and independent
+  forwarder/recoverer polling intervals once async server lifecycle
+  configuration is modeled.
+
 - Added async task timeout/deadline cancellation: `AsyncProcessor` now derives
   the earliest task deadline from `TaskMessage.timeout` and
   `TaskMessage.deadline`, cancels handler execution on expiry, and routes the
@@ -11,8 +23,7 @@
   with unit tests.
 - Updated worker lifecycle docs with the async timeout/deadline behavior.
 - Reference: https://github.com/hibiken/asynq/blob/v0.26.0/processor.go#L221-L381
-- TODO: Add background async lease extension once separate task execution
-  handles are modeled.
+- No new TODOs.
 
 ## 2026-05-15
 
