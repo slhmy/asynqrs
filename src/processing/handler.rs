@@ -14,4 +14,4 @@ pub use middleware::{
     task_middleware_hooks,
 };
 pub use mux::{NotFoundHandler, ServeMux, ServeMuxMatchedHandler, not_found, not_found_handler};
-pub use traits::{Handler, HandlerFunc, TaskHandlerFunc};
+pub use traits::{Handler, HandlerFunc, TaskHandlerFunc, TypedHandlerFunc, typed_handler};

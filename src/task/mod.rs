@@ -4,6 +4,7 @@ mod model;
 mod names;
 mod queue;
 mod state;
+mod typed_payload;
 
 pub use context::{ProcessingContext, ProcessingScope, TaskMetadata};
 pub(crate) use message::{DecodeTaskMessageError, TaskMessage};
@@ -12,3 +13,6 @@ pub use model::Task;
 pub use names::{GroupName, NonBlankNameError, QueueName, TaskId, TaskType};
 pub use queue::{DEFAULT_QUEUE_NAME, QueueNameError, validate_queue_name};
 pub use state::{ParseTaskStateError, TaskState, task_state_from_string};
+pub use typed_payload::{TaskPayloadError, TypedTaskPayload, validate_task_type};
+#[cfg(feature = "serde")]
+pub use typed_payload::{decode_json_task_payload, encode_json_task_payload};

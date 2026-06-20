@@ -12,14 +12,34 @@ server runtime is server-owned: users build Redis-backed clients, servers,
 schedulers, and inspectors through typed constructors rather than constructing a
 `Processor` runtime object.
 
-This project is prepared for publication. `Cargo.toml` now keeps
-`publish = true` after an explicit release decision. Strict Redis smoke evidence
-and the final two-pass release gate are recorded locally with Docker-backed
-testcontainers.
+The 0.2.0 release adds optional typed-payload ergonomics on top of the
+Redis-backed client, server, scheduler, inspector, and aggregation workflows.
+Macro support is opt-in: default builds keep the hand-written task API and do
+not pull the companion proc-macro crate or JSON serialization dependencies.
+
+## Install
+
+Use the core task queue API without optional macro dependencies:
+
+```toml
+[dependencies]
+asynqrs = "0.2"
+```
+
+Enable the typed payload derive and JSON helpers when you want macro-powered
+task definitions:
+
+```toml
+[dependencies]
+asynqrs = { version = "0.2", features = ["macros", "serde"] }
+serde = { version = "1", features = ["derive"] }
+```
 
 ## Public Workflows
 
 - Enqueue tasks with `RedisBackedClient`, `Task`, and `EnqueueOptions`.
+- Define typed task payloads with the optional `macros` and `serde` features,
+  then convert them into ordinary `Task` values.
 - Process tasks with `RedisBackedServerBuilder`, `Config::builder()`, and
   `ServeMux` or a custom `Handler`.
 - Run background servers with `start`, then coordinate `ServerHandle::stop`,
@@ -57,6 +77,22 @@ ASYNQ_RS_REDIS_URL=redis://127.0.0.1:6379/0 cargo run --example server
 ASYNQ_RS_REDIS_URL=redis://127.0.0.1:6379/0 cargo run --example enqueue
 ```
 
+Optional typed payload ergonomics are available behind feature flags:
+
+```sh
+cargo run --example typed_payload --features macros,serde
+cargo run --example macro_handlers --features macros,serde
+```
+
+Manual `TypedTaskPayload` implementations can be written without macro support.
+The `#[derive(TaskPayload)]` convenience path uses JSON helpers, so it requires
+both `macros` and `serde`.
+
+The derive keeps Redis wire behavior ordinary: a typed payload still becomes an
+`asynqrs::Task` with a task type string and payload bytes. Handler adapters and
+`serve_mux!` reduce repeated task type and decode boilerplate without replacing
+`ServeMux`, `Handler`, or `Task::new`.
+
 The release-facing docs are intentionally small:
 
 - [docs/public-api.md](docs/public-api.md): preferred user workflows and public
@@ -72,7 +108,7 @@ The release-facing docs are intentionally small:
 - [docs/release-readiness-roadmap.md](docs/release-readiness-roadmap.md): final
   release decision, evidence checklist, and current audit.
 
-## Verification
+## Development Verification
 
 After code, schema, or public documentation changes, run:
 
@@ -98,20 +134,25 @@ document set listed above. `scripts/release-metadata-scan.sh` keeps
 Cargo package metadata, Rust version/edition policy, the README workflow
 surface, and the changelog release summary aligned with the current release
 decision.
+`scripts/feature-boundary-scan.sh` verifies that default builds do not pull the
+optional macro or serde payload dependencies, that `macros` pulls only the
+macro crate, and that `serde` pulls the JSON serialization helpers without
+pulling the proc-macro crate. It also checks the `macros`-only and `serde`-only
+feature combinations compile.
 `cargo package --list --allow-dirty` is part of the release gate as a
-network-free package file-list smoke. The package surface keeps local CI
-workflows, agent instructions, and release tooling scripts out of the crate
-artifact. Full package verification and publishing remain separate networked release steps,
-not part of the offline release gate.
+package file-list smoke. The package surface keeps local CI workflows, agent
+instructions, and release tooling scripts out of the crate artifact. Full `cargo package -p ... --allow-dirty` verification is also part of the release gate;
+publishing remains the separate irreversible networked release step.
 `scripts/release-gate-shape-scan.sh` keeps the release gate itself aligned with
 the final checklist. The release gate runs scan self-tests first so the patterns
 prove they catch synthetic leaks before checking the real tree. The release gate
-also builds rustdoc with warnings denied through
+also builds default and all-feature rustdoc with warnings denied through
 `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`.
 It runs `cargo clippy --all-targets -- -D warnings` without a release
-allow-list.
+allow-list. Macro work is checked through feature-disabled, all-feature, macro
+crate, all-feature example, and all-feature rustdoc commands.
 
-Before publishing, run the full gate twice in a row:
+For release candidates, run the full gate twice in a row:
 
 ```sh
 scripts/final-release-gate.sh

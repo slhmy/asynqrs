@@ -44,6 +44,7 @@ async fn async_redis_cancel_pubsub_cancels_active_task_inner(fixture: &mut Redis
             .unwrap()
     });
 
+    wait_for_cancel_subscriber(fixture).await;
     wait_for_state(fixture, "task-id", "active").await;
     let mut broker = fixture.async_broker().await;
     broker.cancel_processing("task-id").await.unwrap();
@@ -55,6 +56,28 @@ async fn async_redis_cancel_pubsub_cancels_active_task_inner(fixture: &mut Redis
     wait_for_state(fixture, "task-id", "retry").await;
     shutdown_tx.send(true).unwrap();
     assert_eq!(listener_handle.await.unwrap().unwrap(), 1);
+}
+
+async fn wait_for_cancel_subscriber(fixture: &mut RedisFixture) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let subscribers: Vec<(String, usize)> = redis::cmd("PUBSUB")
+            .arg("NUMSUB")
+            .arg(super::super::keys::CANCEL_CHANNEL)
+            .query(&mut fixture.connection)
+            .unwrap();
+        if subscribers
+            .iter()
+            .any(|(channel, count)| channel == super::super::keys::CANCEL_CHANNEL && *count > 0)
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for cancellation subscriber"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 struct PendingIntegrationHandler;

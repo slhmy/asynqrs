@@ -7,9 +7,13 @@ and concise upstream references only.
 
 ## Current Release Summary
 
-This project is prepared for publication. `Cargo.toml` keeps `publish = true`
-after an explicit release decision. Strict Redis smoke evidence and the final
-two-pass release gate now pass locally with Docker-backed testcontainers.
+This project is staged for final `asynqrs v0.2.0` publication. `Cargo.toml`
+keeps `publish = true` after an explicit release decision. `asynqrs-macros
+v0.2.0` is published to crates.io, and `cargo package -p asynqrs --allow-dirty`
+now passes with the optional macro dependency resolved from the crates.io index.
+Strict Redis smoke evidence passes locally with Docker-backed testcontainers;
+the final two-pass release gate must be rerun before publishing `asynqrs
+v0.2.0`.
 
 Current release-facing state:
 
@@ -28,9 +32,58 @@ Current release-facing state:
 
 Known release blockers:
 
-- None.
+- Rerun the final two-pass release gate in a strict Redis smoke-capable
+  environment, then publish `asynqrs v0.2.0`.
 
 ## 2026-06-20
+
+### 0.2.0 Macro Ergonomics Foundation
+
+- Added an optional `asynqrs-macros` proc-macro crate and feature gates for
+  `macros` and `serde` so macro ergonomics do not affect default builds.
+- Added `TypedTaskPayload`, `TaskPayloadError`, serde-gated JSON payload helpers,
+  and `#[derive(TaskPayload)]` for typed payloads with explicit task type
+  metadata.
+- Added `TypedHandlerFunc`, `typed_handler`, `ServeMux::handle_typed`,
+  `ServeMux::route_typed`, and `serve_mux!` for typed payload handler
+  registration with explicit decode-error mapping to `HandlerError::Failed`.
+- Added `examples/typed_payload.rs`, `examples/macro_handlers.rs`, and release
+  metadata guards for the new workspace/package artifacts.
+- Added `asynqrs-macros` README plus crate-level and derive-level rustdoc so the
+  companion proc-macro package explains feature usage, validation behavior, and
+  staged publishing on crates.io.
+- Routed derive macro serde bounds through the main crate's serde-gated public
+  path so generated code depends on `asynqrs` APIs rather than hidden runtime
+  internals or direct macro-crate assumptions.
+- Added `trybuild` compile-fail coverage for missing, blank, and duplicate
+  `task_type` derive attributes, non-string `task_type` metadata, plus the
+  `serve_mux!` non-typed-payload error path; release metadata scanning now
+  requires those UI fixtures in the package file list.
+- Added direct serde helper tests for `TaskPayloadError::Encode` and
+  `TaskPayloadError::Decode` mapping.
+- Clarified typed payload rustdoc so the public trait, error variants, JSON
+  helpers, and macro crate docs describe feature boundaries without exposing
+  runtime internals.
+- Clarified release-facing docs that manual `TypedTaskPayload` implementations
+  are available without macros/serde, while `#[derive(TaskPayload)]` requires
+  both `macros` and `serde` for the JSON-backed implementation.
+- Updated the README for the 0.2.0 published user surface, including install
+  snippets for default and macro-enabled builds plus typed payload behavior
+  notes.
+- Added `scripts/feature-boundary-scan.sh` to prove default builds do not pull
+  the optional macro or serde dependencies, check `macros`-only and
+  `serde`-only feature compilation, verify the macros-only derive failure path,
+  and wired it into the release gate shape checks.
+- Added all-feature rustdoc with warnings denied to the release gate so
+  macro-gated public APIs are documented under the same strict warning policy as
+  default docs.
+- Published `asynqrs-macros v0.2.0` to crates.io. Package verification evidence:
+  `cargo package -p asynqrs-macros --allow-dirty` and
+  `cargo package -p asynqrs --allow-dirty` pass for 0.2.0 after the optional
+  macro crate dependency resolves through the crates.io index.
+- Reference: Asynq v0.26.0 task construction still maps to ordinary task type
+  and payload bytes:
+  <https://github.com/hibiken/asynq/blob/v0.26.0/asynq.go#L22-L73>.
 
 ### Publication Decision
 
@@ -224,12 +277,12 @@ Known release blockers:
   strict diagnostic path instead of bare `unwrap()` panics.
 - Hardened Redis testcontainer fixture startup so transient Docker port
   resolution failures are retried before strict smoke fails.
-- Current local evidence: release scans, package file-list smoke, Redis
+- Pre-0.2.0 macro local evidence: release scans, package file-list smoke, Redis
   preflight self-tests, clippy with warnings denied, examples,
   doctests, strict rustdoc, full non-Redis tests, formatting, and diff checks
   pass locally. Strict Redis smoke passes with Docker-backed testcontainers
   (`25 passed; 0 failed`), and `scripts/final-release-gate.sh` passes both
-  release-gate passes locally.
+  release-gate passes locally before the staged macro crate package split.
 - Reference: Asynq v0.26.0 Redis-backed lifecycle behavior and internal Redis
   broker operations:
   <https://github.com/hibiken/asynq/tree/v0.26.0/internal/rdb>.

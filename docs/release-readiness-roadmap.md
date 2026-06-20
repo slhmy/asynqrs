@@ -8,14 +8,20 @@ whether the crate remains ready.
 ## Current Decision
 
 The publication decision has been made. `Cargo.toml` now keeps `publish = true`.
-Strict Redis smoke evidence and the final two-pass release gate now pass locally
-with Docker-backed testcontainers.
+Strict Redis smoke evidence passes locally with Docker-backed testcontainers.
+The 0.2.0 release is staged: `asynqrs-macros v0.2.0` is published to crates.io,
+and `asynqrs v0.2.0` package verification now resolves the optional macro crate
+from the crates.io index. Before publishing the main crate, rerun the final
+two-pass release gate in a strict Redis smoke-capable environment.
 
 Release readiness means all of the following are true in the same candidate:
 
 - Public workflows are stable enough for clients, servers, schedulers,
   inspectors, handlers, middleware, and aggregation hooks without depending on
   internal runtime modules.
+- Optional macro ergonomics remain an additive layer over public task and
+  handler APIs; default builds must not pull in proc-macro or serialization
+  dependencies.
 - Redis wire behavior and core task lifecycle behavior remain compatible with
   Asynq v0.26.0 where documented.
 - Rust-native ownership is the baseline: server-owned runtime state, explicit
@@ -24,6 +30,8 @@ Release readiness means all of the following are true in the same candidate:
 - Migration differences from Go Asynq are documented as decisions, not hidden
   accidental gaps.
 - Examples, strict Redis smoke coverage, and the full test suite are green.
+- Full release-gate completion for 0.2.0 waits on the final two-pass release
+  gate rerun described above.
 
 ## Release Documentation Set
 
@@ -65,21 +73,38 @@ final code change:
   Cargo package metadata, README workflow names, crate-level workflow docs, and
   the changelog release summary/blockers still match the current release
   decision.
+- `scripts/feature-boundary-scan.sh --self-test` and
+  `scripts/feature-boundary-scan.sh` confirm default builds do not pull
+  `asynqrs-macros`, `serde`, or `serde_json`; `macros` pulls the macro crate
+  without serialization dependencies; and `serde` pulls the serialization
+  helpers without the macro crate. It also checks that `macros`-only and
+  `serde`-only feature combinations compile.
 - `cargo package --list --allow-dirty` confirms Cargo can produce the package
-  file list for the current release candidate without touching the network.
+  file list for the current release candidate.
   `scripts/release-metadata-scan.sh` also verifies that package list includes
   release docs/examples, no deleted `src/processor` module files, and no local
-  CI workflows, agent instructions, or release tooling scripts. Full package
-  verification and publishing are separate networked release steps, not part of
-  the offline release gate.
+  CI workflows, agent instructions, or release tooling scripts. Full
+  `cargo package -p ... --allow-dirty` verification is part of the release gate;
+  publishing remains the separate irreversible networked release step.
 - `scripts/release-gate-shape-scan.sh --self-test` and
   `scripts/release-gate-shape-scan.sh` confirm the release gate still contains
-  strict Redis smoke, package-list smoke, examples, doctests, rustdoc with
-  warnings denied, clippy with warnings denied, full tests, buf,
-  formatting, scans, and whitespace checks, that the final gate still runs two
-  passes, and that CI still runs the same release gate with strict Redis mode, a
-  Redis URL, and a Redis service rather than relying on Docker-in-Docker.
-- `CHANGELOG.md` top summary still lists no active known blockers.
+  strict Redis smoke, package-list smoke, examples, doctests, default and
+  all-feature rustdoc with warnings denied, clippy with warnings denied, macro crate tests,
+  feature-disabled tests, all-feature tests, the feature boundary scan,
+  all-feature examples, full tests, buf, formatting, scans, and whitespace
+  checks, that the final gate still runs two passes, and that CI still runs the
+  same release gate with strict Redis mode, a Redis URL, and a Redis service
+  rather than relying on Docker-in-Docker.
+- `CHANGELOG.md` top summary states that `asynqrs-macros v0.2.0` is published,
+  main package verification passes, and the remaining release blocker is the
+  final two-pass gate plus `asynqrs v0.2.0` publish.
+- For 0.2.0 macro ergonomics, publish order is explicit: run package
+  verification for `asynqrs-macros`, publish `asynqrs-macros`, then run package
+  verification for `asynqrs` and publish `asynqrs`.
+- Current package evidence: `cargo publish -p asynqrs-macros --allow-dirty`
+  published `asynqrs-macros v0.2.0`, and
+  `cargo package -p asynqrs --allow-dirty` now passes for 0.2.0 with the macro
+  crate resolved through the crates.io index.
 
 ## Current Release Audit
 
@@ -93,8 +118,9 @@ release step.
 | Maintenance, shutdown, requeue, metadata, cancellation, active-worker, and pending-sync ownership lives outside `Processor`. | Proven locally | Server-owned modules cover active workers, cancellation, pending sync, shutdown, maintenance brokers/runners, metadata heartbeat, worker runtime, and worker assembly. The runtime redesign doc records these as current ownership boundaries. | None known for ownership; future cleanup can still fold single-implementation internal traits when a stronger concrete boundary exists. |
 | Remaining internal adapter traits are deleted or documented as real boundaries. | Proven locally | Test-only dequeue, complete, result, and server-only stale aggregation reclaim aliases are deleted. `docs/rust-native-runtime-redesign.md` lists retained internal traits and why each remains. Server broker capability traits are crate-private runtime/test boundaries. | Re-audit retained capability traits when new runtime traits are added or when a boundary becomes a single-implementation pass-through. |
 | Public API feels Rust-native and workflow-oriented. | Proven locally | `docs/public-api.md`, README, and crate docs lead with Redis-backed builders, typed config, handlers, middleware, scheduler, Inspector, and aggregation workflows. Implementation-shaped runtime state was removed from the public surface. `scripts/public-api-scan.sh --self-test` and the real scan guard the current facade. | Re-run public API scans before publishing or after adding public names. |
+| Optional macro ergonomics stay additive. | Macro crate published; main package verified | `TypedTaskPayload`, `TaskPayloadError`, serde-gated JSON helpers, `#[derive(TaskPayload)]`, typed handler adapters, and `serve_mux!` are feature-gated or additive. The release gate shape requires macro crate tests, `--no-default-features`, `--all-features`, the feature boundary scan, all-feature examples, and all-feature rustdoc. `trybuild` covers missing, blank, and duplicate `task_type` derive attributes plus the `serve_mux!` non-payload error path. `asynqrs-macros` has README/crate docs and is published as `v0.2.0`; `cargo package -p asynqrs --allow-dirty` now passes. | Rerun the final two-pass gate, then publish `asynqrs v0.2.0`. |
 | Go Asynq differences are explicit. | Proven locally | Migration, public API, alignment gaps, and source `Reference:` comments explain Rust-native choices around Redis construction, config builders, handler context, scheduler registration, metadata codecs, and runtime ownership. `scripts/semantic-gap-scan.sh --self-test` and the real scan guard stale gap markers and processor-shaped runtime wording. | Re-run semantic scans before publishing or after adding public APIs, especially after Redis smoke evidence is recorded. |
 | Docs describe current architecture, not refactor history. | Proven locally | Docs directory is limited to the release documentation set above. `scripts/docs-set-scan.sh --self-test` and the real scan guard extra or missing docs. `CHANGELOG.md` is compressed release-facing project memory with the current API/architecture state and known blockers; obsolete intermediate Processor-era gaps are left to git history. | Keep future changelog additions grouped and concise so the release summary stays usable. |
 | Key migration examples are executable. | Proven locally | README and migration guide point key workflows to compiled examples: enqueue, server processing, middleware hooks, handler failure, graceful shutdown, scheduler registration, inspector metadata reads, and aggregation customization. CI and local verification run `cargo test --examples`; crate-level docs contain compile-checked `no_run` snippets. | Convert additional prose snippets into doctests only if doc drift becomes a recurring problem. |
 | Redis smoke coverage exercises core lifecycle paths. | Proven locally | `docs/redis-smoke-matrix.md` records current Redis-backed scenarios and the strict serial command for `broker::redis::tests::*`. GitHub CI runs that strict command against a Redis service container through `ASYNQ_RS_REDIS_URL`, not Docker-in-Docker. Local strict Redis smoke now passes with Docker-backed testcontainers: `25 passed; 0 failed; 0 ignored`. | Re-run strict Redis smoke before publishing or after Redis/runtime changes. |
-| Full verification is green twice in a row. | Proven locally | `scripts/final-release-gate.sh` passes both release-gate passes locally. Each pass includes buf, formatting, clippy with warnings denied, release-gate shape, metadata, package file-list smoke, docs-set, public API, semantic-gap, Redis preflight, strict Redis smoke, examples, doctests, strict rustdoc, full tests, and `git diff --check`. | Re-run the final gate immediately before the networked publish step. |
+| Full verification is green twice in a row. | Needs final gate rerun before main publish | `scripts/final-release-gate.sh` is the two-pass gate. Each pass includes buf, formatting, clippy with warnings denied, release-gate shape, metadata, package file-list smoke, full package verification, docs-set, public API, semantic-gap, Redis preflight, strict Redis smoke, examples, doctests, default and all-feature strict rustdoc, full tests, and `git diff --check`. | Rerun the final gate in a strict Redis smoke-capable environment, then publish `asynqrs v0.2.0`. |

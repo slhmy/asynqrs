@@ -132,6 +132,10 @@ remain the source for exact implementation details.
 - Status: Resolved as intentional Rust API choices.
 - Rust-native API and architecture are preferred whenever upstream behavior can
   be preserved without copying Go-specific shapes.
+- Optional typed payload macros are Rust-native ergonomics over Asynq task type
+  and payload bytes. Upstream has no equivalent derive macro; compatibility is
+  preserved by producing ordinary tasks and keeping Redis payload bytes under
+  user-controlled serialization.
 - Go nil pointer branches are represented with `Option<&T>` encoders where the
   public compatibility function needs to preserve upstream nil errors.
 - Go variadic functions are represented with iterable Rust arguments or

@@ -4,9 +4,9 @@ use async_trait::async_trait;
 
 use super::{
     Handler, HandlerError, HandlerFunc, TaskMiddleware, TaskMiddlewareFn, TaskMiddlewareHooks,
-    task_middleware_hooks,
+    TypedHandlerFunc, task_middleware_hooks,
 };
-use crate::{ProcessingContext, Task};
+use crate::{ProcessingContext, Task, TypedTaskPayload};
 
 /// Multiplexes tasks to handlers by task type pattern.
 ///
@@ -56,6 +56,14 @@ impl ServeMux {
         self.handle(pattern, HandlerFunc(handler));
     }
 
+    pub fn handle_typed<P, F>(&mut self, handler: F)
+    where
+        P: TypedTaskPayload + Send + 'static,
+        F: FnMut(P, &ProcessingContext) -> Result<(), HandlerError> + Send + 'static,
+    {
+        self.handle(P::TASK_TYPE, TypedHandlerFunc::<P, F>::new(handler));
+    }
+
     pub fn route<H>(mut self, pattern: impl Into<String>, handler: H) -> Self
     where
         H: Handler + Send + 'static,
@@ -69,6 +77,15 @@ impl ServeMux {
         F: FnMut(&Task, &ProcessingContext) -> Result<(), HandlerError> + Send + 'static,
     {
         self.handle_fn(pattern, handler);
+        self
+    }
+
+    pub fn route_typed<P, F>(mut self, handler: F) -> Self
+    where
+        P: TypedTaskPayload + Send + 'static,
+        F: FnMut(P, &ProcessingContext) -> Result<(), HandlerError> + Send + 'static,
+    {
+        self.handle_typed::<P, F>(handler);
         self
     }
 

@@ -1,0 +1,5 @@
+error: `task_type` must contain one or more non-whitespace characters
+ --> tests/ui/task_payload_blank_task_type.rs:5:15
+  |
+5 | #[task_type = " "]
+  |               ^^^

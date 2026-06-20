@@ -1,0 +1,18 @@
+[package]
+name = "asynqrs-macros"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Proc macros for asynqrs typed task ergonomics."
+repository = "https://github.com/slhmy/asynq-rs"
+readme = "README.md"
+license = "MIT"
+publish = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["derive"] }

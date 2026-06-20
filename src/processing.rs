@@ -13,9 +13,10 @@ pub(crate) use executor::TaskExecutor;
 pub use handler::{
     ErrorHandler, ErrorHandlerFunc, Handler, HandlerError, HandlerFunc, NoopErrorHandler,
     NotFoundHandler, ServeMux, ServeMuxMatchedHandler, SharedErrorHandler, TaskHandlerFunc,
-    TaskMiddleware, TaskMiddlewareFn, TaskMiddlewareHooks, is_handler_not_found_error,
-    is_lease_expired_error, is_panic_error, is_revoke_task_error, is_skip_retry_error, not_found,
-    not_found_handler, task_middleware_fn, task_middleware_hooks,
+    TaskMiddleware, TaskMiddlewareFn, TaskMiddlewareHooks, TypedHandlerFunc,
+    is_handler_not_found_error, is_lease_expired_error, is_panic_error, is_revoke_task_error,
+    is_skip_retry_error, not_found, not_found_handler, task_middleware_fn, task_middleware_hooks,
+    typed_handler,
 };
 pub use lease::{
     ExtendLeaseBeforeProcess, ExtendLeaseWhileProcessing, LeaseExtender, NoopLeaseExtender,

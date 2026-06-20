@@ -1,0 +1,7 @@
+error: missing `#[task_type = "..."]` attribute
+ --> tests/ui/task_payload_missing_task_type.rs:4:56
+  |
+4 | #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, TaskPayload)]
+  |                                                        ^^^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `TaskPayload` (in Nightly builds, run with -Z macro-backtrace for more info)

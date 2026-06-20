@@ -102,6 +102,8 @@ pub mod server;
 mod signal;
 pub mod task;
 
+extern crate self as asynqrs;
+
 use thiserror::Error;
 
 /// Asynq upstream version targeted by this compatibility implementation.
@@ -149,9 +151,10 @@ pub use processing::{
     LeaseExtender, NoopErrorHandler, NoopLeaseExtender, NotFoundHandler, RetryDelay,
     RetryDelayFunc, ServeMux, ServeMuxMatchedHandler, SharedErrorHandler, SharedIsFailure,
     SharedRetryDelay, TaskHandlerFunc, TaskMiddleware, TaskMiddlewareFn, TaskMiddlewareHooks,
-    default_is_failure_func, default_retry_delay_func, is_handler_not_found_error,
-    is_lease_expired_error, is_panic_error, is_revoke_task_error, is_skip_retry_error,
-    lease_expired_error, not_found, not_found_handler, task_middleware_fn, task_middleware_hooks,
+    TypedHandlerFunc, default_is_failure_func, default_retry_delay_func,
+    is_handler_not_found_error, is_lease_expired_error, is_panic_error, is_revoke_task_error,
+    is_skip_retry_error, lease_expired_error, not_found, not_found_handler, task_middleware_fn,
+    task_middleware_hooks, typed_handler,
 };
 pub use scheduler::{
     DEFAULT_SCHEDULER_HEARTBEAT_INTERVAL, DEFAULT_SCHEDULER_METADATA_TTL,
@@ -175,8 +178,30 @@ pub use server::{
 };
 pub use task::{
     DEFAULT_QUEUE_NAME, GroupName, NonBlankNameError, ParseTaskStateError, ProcessingContext,
-    ProcessingScope, QueueName, QueueNameError, Task, TaskId, TaskMetadata, TaskState, TaskType,
+    ProcessingScope, QueueName, QueueNameError, Task, TaskId, TaskMetadata, TaskPayloadError,
+    TaskState, TaskType, TypedTaskPayload,
 };
+#[cfg(feature = "serde")]
+pub use task::{decode_json_task_payload, encode_json_task_payload};
+
+#[cfg(feature = "serde")]
+#[doc(hidden)]
+pub use serde;
+
+#[cfg(feature = "macros")]
+pub use asynqrs_macros::TaskPayload;
+
+#[cfg(feature = "macros")]
+#[macro_export]
+macro_rules! serve_mux {
+    ($($payload:ty => $handler:expr),+ $(,)?) => {{
+        let mut mux = $crate::ServeMux::new();
+        $(
+            mux.handle_typed::<$payload, _>($handler);
+        )+
+        mux
+    }};
+}
 
 /// Common imports for applications using the public task queue API.
 pub mod prelude {
@@ -190,8 +215,15 @@ pub mod prelude {
         RedisBackedServerBuilder, Scheduler, SchedulerEnqueueEventInfo, SchedulerEntry,
         SchedulerEntryInfo, SchedulerOpts, ServeMux, ServerError, ServerHandle, ServerInfo,
         ServerProcessingScope, Task, TaskId, TaskInfo, TaskMetadata, TaskMiddlewareHooks,
-        TaskState, TaskType, WorkerInfo, task_middleware_hooks,
+        TaskPayloadError, TaskState, TaskType, TypedHandlerFunc, TypedTaskPayload, WorkerInfo,
+        task_middleware_hooks, typed_handler,
     };
+
+    #[cfg(feature = "macros")]
+    pub use crate::TaskPayload;
+
+    #[cfg(feature = "macros")]
+    pub use crate::serve_mux;
 }
 
 #[cfg(test)]

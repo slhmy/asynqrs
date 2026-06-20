@@ -108,6 +108,22 @@ check_package_list() {
     'examples/scheduler.rs' \
     'examples/inspector_metadata.rs' \
     'examples/aggregation.rs' \
+    'examples/typed_payload.rs' \
+    'examples/macro_handlers.rs' \
+    'tests/task_payload_derive.rs' \
+    'tests/task_payload_derive_feature_boundary.rs' \
+    'tests/ui/task_payload_pass.rs' \
+    'tests/ui/task_payload_requires_serde_feature.rs' \
+    'tests/ui/task_payload_missing_task_type.rs' \
+    'tests/ui/task_payload_missing_task_type.stderr' \
+    'tests/ui/task_payload_blank_task_type.rs' \
+    'tests/ui/task_payload_blank_task_type.stderr' \
+    'tests/ui/task_payload_non_string_task_type.rs' \
+    'tests/ui/task_payload_non_string_task_type.stderr' \
+    'tests/ui/task_payload_duplicate_task_type.rs' \
+    'tests/ui/task_payload_duplicate_task_type.stderr' \
+    'tests/ui/serve_mux_non_payload.rs' \
+    'tests/ui/serve_mux_non_payload.stderr' \
     'src/broker/redis/scripts/call.rs' \
     'src/broker/redis/scripts/registry.rs' \
     'src/broker/redis/scripts/sources.rs' \
@@ -144,6 +160,21 @@ check_package_list() {
     "cargo package file list must not include local release tooling scripts" \
     '^scripts/' \
     "${package_list}"
+}
+
+check_macro_package_list() {
+  local package_list=$1
+
+  for path in \
+    'Cargo.toml' \
+    'README.md' \
+    'src/lib.rs'
+  do
+    check_text_present \
+      "asynqrs-macros package file list must include ${path}" \
+      "^${path}$" \
+      "${package_list}"
+  done
 }
 
 check_matches_sample() {
@@ -199,6 +230,21 @@ if [[ "${1:-}" == "--self-test" ]]; then
     'license = "MIT"'
 
   check_matches_sample \
+    "macro crate README metadata pattern" \
+    '^readme = "README\.md"$' \
+    'readme = "README.md"'
+
+  check_matches_sample \
+    "macro crate feature boundary README pattern" \
+    'features = \["macros", "serde"\]' \
+    'asynqrs = { version = "0.2", features = ["macros", "serde"] }'
+
+  check_matches_sample \
+    "macro derive requires macros and serde wording pattern" \
+    '`#\[derive\(TaskPayload\)\]` requires both `asynqrs/macros` and `asynqrs/serde`' \
+    '`#[derive(TaskPayload)]` requires both `asynqrs/macros` and `asynqrs/serde`.'
+
+  check_matches_sample \
     "README workflow API pattern" \
     'RedisBackedClient|RedisBackedServerBuilder|RedisBackedScheduler|GroupAggregator|Inspector' \
     '- Aggregate grouped tasks with `GroupAggregator` or `GroupAggregatorFunc`.'
@@ -229,9 +275,9 @@ if [[ "${1:-}" == "--self-test" ]]; then
     'cargo package --list --allow-dirty confirms the package file list.'
 
   check_matches_sample \
-    "networked package release step wording pattern" \
-    'networked release step' \
-    'Full package verification and publishing remain separate networked release steps.'
+    "full package verification release gate wording pattern" \
+    'Full .*cargo package -p \.\.\. --allow-dirty.* release gate' \
+    'Full `cargo package -p ... --allow-dirty` verification is also part of the release gate.'
 
   check_matches_sample \
     "strict rustdoc wording pattern" \
@@ -354,11 +400,12 @@ RUNTIME_DOCS
 
 Known release blockers:
 
-- None.
+- Rerun the final two-pass release gate in a strict Redis smoke-capable
+  environment, then publish `asynqrs v0.2.0`.
 
 Current local evidence: strict Redis smoke passes with Docker-backed
-testcontainers (`25 passed; 0 failed`), and `scripts/final-release-gate.sh`
-passes both release-gate passes locally.
+testcontainers (`25 passed; 0 failed`), `asynqrs-macros v0.2.0` is published,
+and the final two-pass release gate must be rerun before publishing `asynqrs v0.2.0`.
 CHANGELOG
   check_absent \
     "self-test clean changelog must not carry stale refactor known-gap markers" \
@@ -377,8 +424,11 @@ CHANGELOG
   fi
   failures=${before_stale_changelog_failures}
 
-  clean_package_list=$'Cargo.toml\nREADME.md\nCHANGELOG.md\ndocs/alignment-gaps.md\ndocs/migration.md\ndocs/public-api.md\ndocs/redis-smoke-matrix.md\ndocs/release-readiness-roadmap.md\ndocs/rust-native-runtime-redesign.md\nexamples/enqueue.rs\nexamples/server.rs\nexamples/middleware.rs\nexamples/handler_failure.rs\nexamples/graceful_shutdown.rs\nexamples/scheduler.rs\nexamples/inspector_metadata.rs\nexamples/aggregation.rs\nsrc/broker/redis/scripts/call.rs\nsrc/broker/redis/scripts/registry.rs\nsrc/broker/redis/scripts/sources.rs\nsrc/broker/redis/scripts/spec.rs\nsrc/lib.rs'
+  clean_package_list=$'Cargo.toml\nREADME.md\nCHANGELOG.md\ndocs/alignment-gaps.md\ndocs/migration.md\ndocs/public-api.md\ndocs/redis-smoke-matrix.md\ndocs/release-readiness-roadmap.md\ndocs/rust-native-runtime-redesign.md\nexamples/enqueue.rs\nexamples/server.rs\nexamples/middleware.rs\nexamples/handler_failure.rs\nexamples/graceful_shutdown.rs\nexamples/scheduler.rs\nexamples/inspector_metadata.rs\nexamples/aggregation.rs\nexamples/typed_payload.rs\nexamples/macro_handlers.rs\ntests/task_payload_derive.rs\ntests/task_payload_derive_feature_boundary.rs\ntests/ui/task_payload_pass.rs\ntests/ui/task_payload_requires_serde_feature.rs\ntests/ui/task_payload_missing_task_type.rs\ntests/ui/task_payload_missing_task_type.stderr\ntests/ui/task_payload_blank_task_type.rs\ntests/ui/task_payload_blank_task_type.stderr\ntests/ui/task_payload_non_string_task_type.rs\ntests/ui/task_payload_non_string_task_type.stderr\ntests/ui/task_payload_duplicate_task_type.rs\ntests/ui/task_payload_duplicate_task_type.stderr\ntests/ui/serve_mux_non_payload.rs\ntests/ui/serve_mux_non_payload.stderr\nsrc/broker/redis/scripts/call.rs\nsrc/broker/redis/scripts/registry.rs\nsrc/broker/redis/scripts/sources.rs\nsrc/broker/redis/scripts/spec.rs\nsrc/lib.rs'
   check_package_list "${clean_package_list}"
+
+  clean_macro_package_list=$'Cargo.toml\nREADME.md\nsrc/lib.rs'
+  check_macro_package_list "${clean_macro_package_list}"
 
   stale_package_list="${clean_package_list}"$'\nsrc/processor.rs'
   before_stale_package_failures=${failures}
@@ -409,7 +459,7 @@ CHANGELOG
 
   check_matches_sample \
     "migration compiled example link pattern" \
-    'examples/(enqueue|server|middleware|handler_failure|graceful_shutdown|scheduler|inspector_metadata|aggregation)\.rs' \
+    'examples/(enqueue|server|middleware|handler_failure|graceful_shutdown|scheduler|inspector_metadata|aggregation|typed_payload|macro_handlers)\.rs' \
     'Compiled example: [`examples/middleware.rs`](../examples/middleware.rs).'
 
   if [[ -f "examples/__missing_release_metadata_scan_self_test__.rs" ]]; then
@@ -420,9 +470,9 @@ CHANGELOG
   check_matches_sample \
     "registered example allow-list pattern" \
     '(^| )middleware( |$)' \
-    'enqueue server middleware handler_failure graceful_shutdown scheduler inspector_metadata aggregation'
+    'enqueue server middleware handler_failure graceful_shutdown scheduler inspector_metadata aggregation typed_payload macro_handlers'
 
-  if printf '%s\n' 'enqueue server middleware handler_failure graceful_shutdown scheduler inspector_metadata aggregation' \
+  if printf '%s\n' 'enqueue server middleware handler_failure graceful_shutdown scheduler inspector_metadata aggregation typed_payload macro_handlers' \
     | rg -n '(^| )untracked( |$)' - >/dev/null; then
     echo "release metadata scan self-test failed: untracked example name was accepted by allow-list pattern" >&2
     failures=$((failures + 1))
@@ -439,9 +489,9 @@ CHANGELOG
     'Known release blockers:'
 
   check_matches_sample \
-    "changelog no active blocker pattern" \
-    '^- None\.$' \
-    '- None.'
+    "changelog final main publish blocker pattern" \
+    'publish `asynqrs v0\.2\.0`' \
+    'Rerun final verification, then publish `asynqrs v0.2.0`.'
 
   check_matches_sample \
     "changelog strict Redis pass evidence pattern" \
@@ -449,9 +499,14 @@ CHANGELOG
     'Current local evidence: strict Redis smoke passes with Docker-backed testcontainers (`25 passed; 0 failed`).'
 
   check_matches_sample \
-    "changelog final gate pass evidence pattern" \
-    'scripts/final-release-gate\.sh.*passes both|final two-pass release gate now pass' \
-    'Current local evidence: `scripts/final-release-gate.sh` passes both release-gate passes locally.'
+    "changelog macro published evidence pattern" \
+    '`asynqrs-macros v0\.2\.0` is published' \
+    '`asynqrs-macros v0.2.0` is published.'
+
+  check_matches_sample \
+    "changelog final gate before main publish evidence pattern" \
+    'final two-pass release gate must be rerun before publishing `asynqrs v0\.2\.0`' \
+    'The final two-pass release gate must be rerun before publishing `asynqrs v0.2.0`.'
 
   check_matches_sample \
     "changelog stale gap marker pattern" \
@@ -541,8 +596,26 @@ check_present \
   '^license = "MIT"$' \
   Cargo.toml
 
-package_list=$(cargo package --list --allow-dirty)
+check_present \
+  "asynqrs-macros Cargo.toml must keep README metadata before release" \
+  '^readme = "README\.md"$' \
+  asynqrs-macros/Cargo.toml
+
+check_present \
+  "asynqrs-macros README must describe main-crate feature usage" \
+  'features = \["macros", "serde"\]' \
+  asynqrs-macros/README.md
+
+check_present \
+  "asynqrs-macros README must say derive requires macros and serde" \
+  '`#\[derive\(TaskPayload\)\]` requires both `asynqrs/macros` and `asynqrs/serde`' \
+  asynqrs-macros/README.md
+
+package_list=$(cargo package -p asynqrs --list --allow-dirty)
 check_package_list "${package_list}"
+
+macro_package_list=$(cargo package -p asynqrs-macros --list --allow-dirty)
+check_macro_package_list "${macro_package_list}"
 
 check_present \
   "README must mention the preferred Redis-backed client workflow" \
@@ -610,8 +683,8 @@ check_present \
   README.md
 
 check_present \
-  "README must keep full package verification separate from the offline gate" \
-  'networked release steps?' \
+  "README must mention full package verification in the release gate" \
+  'cargo package -p \.\.\. --allow-dirty.*release gate' \
   README.md
 
 check_present \
@@ -700,8 +773,8 @@ check_present \
   docs/release-readiness-roadmap.md
 
 check_present \
-  "release roadmap must keep full package verification separate from the offline gate" \
-  'networked release steps?' \
+  "release roadmap must mention full package verification in the release gate" \
+  'cargo package -p \.\.\. --allow-dirty.*release gate' \
   docs/release-readiness-roadmap.md
 
 check_present \
@@ -762,7 +835,9 @@ for example in \
   graceful_shutdown \
   scheduler \
   inspector_metadata \
-  aggregation
+  aggregation \
+  typed_payload \
+  macro_handlers
 do
   check_present \
     "migration guide must link compiled ${example} example" \
@@ -774,7 +849,7 @@ do
     "examples/${example}.rs"
 done
 
-check_no_extra_examples "enqueue server middleware handler_failure graceful_shutdown scheduler inspector_metadata aggregation"
+check_no_extra_examples "enqueue server middleware handler_failure graceful_shutdown scheduler inspector_metadata aggregation typed_payload macro_handlers"
 
 check_present \
   "CHANGELOG must keep a current release summary" \
@@ -787,8 +862,8 @@ check_present \
   CHANGELOG.md
 
 check_present \
-  "CHANGELOG release blockers must record no active blockers" \
-  '^- None\.$' \
+  "CHANGELOG release blockers must record final main publish blocker" \
+  'publish `asynqrs v0\.2\.0`' \
   CHANGELOG.md
 
 check_present \
@@ -797,8 +872,13 @@ check_present \
   CHANGELOG.md
 
 check_present \
-  "CHANGELOG must include final two-pass gate pass evidence" \
-  'scripts/final-release-gate\.sh.*passes both|final two-pass release gate now pass' \
+  "CHANGELOG must include macro crate published evidence" \
+  'v0\.2\.0` is published to crates\.io' \
+  CHANGELOG.md
+
+check_present \
+  "CHANGELOG must include final gate rerun before main publish evidence" \
+  'final two-pass release gate must be rerun before publishing `asynqrs' \
   CHANGELOG.md
 
 check_absent \

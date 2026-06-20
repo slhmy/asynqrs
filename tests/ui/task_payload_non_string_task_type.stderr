@@ -1,0 +1,5 @@
+error: `task_type` value must be a string literal
+ --> tests/ui/task_payload_non_string_task_type.rs:5:15
+  |
+5 | #[task_type = 42]
+  |               ^^

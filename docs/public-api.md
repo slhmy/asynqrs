@@ -39,6 +39,15 @@ documented close to the implementation details that need it.
 - Shared connection ownership affects `close` behavior but is not exposed as
   public workflow introspection.
 - Preferred task flow: `Task::new` plus enqueue-time `EnqueueOptions`.
+- Optional typed payload flow: enable `macros` and `serde`, derive
+  `TaskPayload`, and use `TypedTaskPayload::into_task` to produce an ordinary
+  `Task`. This is an ergonomic layer over task type and payload bytes, not a
+  separate runtime boundary. Manual `TypedTaskPayload` implementations remain
+  available without the macro or serde features.
+- Optional typed handler flow: use `typed_handler`, `TypedHandlerFunc`,
+  `ServeMux::handle_typed`, `ServeMux::route_typed`, or `serve_mux!` to decode
+  typed payloads before invoking user handlers while preserving ordinary
+  `ServeMux` dispatch and `ProcessingContext`.
 - Preferred enqueue methods: `enqueue_async`, `enqueue_with_async`, and
   `enqueue_scoped_with_async`.
 - `ClientEnqueueScope` is a public Rust-native replacement for Go
@@ -51,6 +60,13 @@ documented close to the implementation details that need it.
   backends; low-level broker traits may live under `client`, but broker
   introspection stays test-only and those traits should not be promoted to
   crate-root workflow exports.
+- `asynqrs-macros` is a proc-macro helper crate. Macro expansions must target
+  public `asynqrs` APIs such as `TypedTaskPayload`, `TaskPayloadError`, and
+  serde-gated JSON helpers; they must not depend on crate-private runtime
+  internals.
+- The `serve_mux!` helper expands to ordinary `ServeMux` construction and typed
+  handler registration. It is deliberately small and should not become a broad
+  routing DSL.
 
 ## Server and Handlers
 
@@ -70,6 +86,9 @@ documented close to the implementation details that need it.
 - Preferred handler path: `ServeMux::new` plus chainable `route` / `route_fn`
   registration with `Task` and `ProcessingContext`. Mutable `handle` /
   `handle_fn` registration remains available for compatibility and tests.
+- Typed handler registration is additive: `ServeMux::handle_typed` and
+  `ServeMux::route_typed` register exact `TypedTaskPayload::TASK_TYPE` handlers
+  and map payload decode failures to `HandlerError::Failed`.
 - Preferred customization path: handler/middleware composition plus
   `ConfigBuilder` hooks for retry delay, failure classification, error
   handling, and processing scopes. There is no user-facing `Processor`

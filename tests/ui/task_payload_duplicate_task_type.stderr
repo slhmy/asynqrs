@@ -1,0 +1,5 @@
+error: duplicate `task_type` attribute
+ --> tests/ui/task_payload_duplicate_task_type.rs:6:1
+  |
+6 | #[task_type = "email:duplicate"]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

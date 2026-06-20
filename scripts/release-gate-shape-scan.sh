@@ -64,11 +64,19 @@ scan_release_gate() {
   check_present "release gate must run buf lint" '^buf lint$' "${release_gate}"
   check_present "release gate must run cargo fmt check" '^cargo fmt --check$' "${release_gate}"
   check_present "release gate must run clippy with warnings denied" '^cargo clippy --all-targets -- -D warnings$' "${release_gate}"
+  check_present "release gate must test macro crate" '^cargo test -p asynqrs-macros$' "${release_gate}"
+  check_present "release gate must test feature-disabled builds" '^cargo test --no-default-features$' "${release_gate}"
+  check_present "release gate must test all feature builds" '^cargo test --all-features$' "${release_gate}"
+  check_present "release gate must run feature boundary scan self-test" '^scripts/feature-boundary-scan\.sh --self-test$' "${release_gate}"
+  check_present "release gate must run feature boundary scan" '^scripts/feature-boundary-scan\.sh$' "${release_gate}"
   check_present "release gate must run release gate shape scan self-test" '^scripts/release-gate-shape-scan\.sh --self-test$' "${release_gate}"
   check_present "release gate must run release gate shape scan" '^scripts/release-gate-shape-scan\.sh$' "${release_gate}"
   check_present "release gate must run release metadata scan self-test" '^scripts/release-metadata-scan\.sh --self-test$' "${release_gate}"
   check_present "release gate must run release metadata scan" '^scripts/release-metadata-scan\.sh$' "${release_gate}"
-  check_present "release gate must run cargo package list smoke" '^cargo package --list --allow-dirty >/dev/null$' "${release_gate}"
+  check_present "release gate must run main crate package list smoke" '^cargo package -p asynqrs --list --allow-dirty >/dev/null$' "${release_gate}"
+  check_present "release gate must run macro crate package list smoke" '^cargo package -p asynqrs-macros --list --allow-dirty >/dev/null$' "${release_gate}"
+  check_present "release gate must verify macro crate package" '^cargo package -p asynqrs-macros --allow-dirty$' "${release_gate}"
+  check_present "release gate must verify main crate package" '^cargo package -p asynqrs --allow-dirty$' "${release_gate}"
   check_present "release gate must run docs set scan self-test" '^scripts/docs-set-scan\.sh --self-test$' "${release_gate}"
   check_present "release gate must run docs set scan" '^scripts/docs-set-scan\.sh$' "${release_gate}"
   check_present "release gate must run public API scan self-test" '^scripts/public-api-scan\.sh --self-test$' "${release_gate}"
@@ -79,8 +87,10 @@ scan_release_gate() {
   check_present "release gate must run Redis smoke preflight" '^scripts/redis-smoke-preflight\.sh$' "${release_gate}"
   check_present "release gate must run strict Redis smoke command" '^cargo test broker::redis::tests:: -- --nocapture --test-threads=1$' "${release_gate}"
   check_present "release gate must compile examples" '^cargo test --examples$' "${release_gate}"
+  check_present "release gate must compile all-feature examples" '^cargo test --examples --all-features$' "${release_gate}"
   check_present "release gate must run doctests" '^cargo test --doc$' "${release_gate}"
   check_present "release gate must build rustdoc with warnings denied" '^RUSTDOCFLAGS="-D warnings" cargo doc --no-deps$' "${release_gate}"
+  check_present "release gate must build all-feature rustdoc with warnings denied" '^RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features$' "${release_gate}"
   check_present "release gate must run the full test suite" '^cargo test --quiet$' "${release_gate}"
   check_present "release gate must run whitespace diff check" '^git diff --check$' "${release_gate}"
 
@@ -93,13 +103,31 @@ scan_release_gate() {
   check_order \
     "release gate must run clippy before release shape scans" \
     '^cargo clippy --all-targets -- -D warnings$' \
+    '^cargo test -p asynqrs-macros$' \
+    "${release_gate}"
+
+  check_order \
+    "release gate must run feature checks before release shape scans" \
+    '^cargo test --all-features$' \
+    '^scripts/feature-boundary-scan\.sh --self-test$' \
+    "${release_gate}"
+
+  check_order \
+    "release gate must run feature boundary scan before release shape scans" \
+    '^scripts/feature-boundary-scan\.sh$' \
     '^scripts/release-gate-shape-scan\.sh --self-test$' \
     "${release_gate}"
 
   check_order \
     "release gate must run package file-list smoke before Redis preflight" \
-    '^cargo package --list --allow-dirty >/dev/null$' \
+    '^cargo package -p asynqrs --allow-dirty$' \
     '^scripts/redis-smoke-preflight\.sh$' \
+    "${release_gate}"
+
+  check_order \
+    "release gate must verify macro package before main package" \
+    '^cargo package -p asynqrs-macros --allow-dirty$' \
+    '^cargo package -p asynqrs --allow-dirty$' \
     "${release_gate}"
 
   check_order \
@@ -115,14 +143,26 @@ scan_release_gate() {
     "${release_gate}"
 
   check_order \
+    "release gate must compile default examples before all-feature examples" \
+    '^cargo test --examples$' \
+    '^cargo test --examples --all-features$' \
+    "${release_gate}"
+
+  check_order \
     "release gate must run doctests before rustdoc" \
     '^cargo test --doc$' \
     '^RUSTDOCFLAGS="-D warnings" cargo doc --no-deps$' \
     "${release_gate}"
 
   check_order \
-    "release gate must run rustdoc before full tests" \
+    "release gate must run default rustdoc before all-feature rustdoc" \
     '^RUSTDOCFLAGS="-D warnings" cargo doc --no-deps$' \
+    '^RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features$' \
+    "${release_gate}"
+
+  check_order \
+    "release gate must run all-feature rustdoc before full tests" \
+    '^RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features$' \
     '^cargo test --quiet$' \
     "${release_gate}"
 
@@ -139,6 +179,7 @@ scan_script_entrypoints() {
 
   for script in \
     docs-set-scan.sh \
+    feature-boundary-scan.sh \
     final-release-gate.sh \
     public-api-scan.sh \
     redis-smoke-preflight.sh \
@@ -208,6 +249,21 @@ if [[ "${1:-}" == "--self-test" ]]; then
     'cargo clippy --all-targets -- -D warnings'
 
   check_matches_sample \
+    "macro crate test command pattern" \
+    '^cargo test -p asynqrs-macros$' \
+    'cargo test -p asynqrs-macros'
+
+  check_matches_sample \
+    "no default features test command pattern" \
+    '^cargo test --no-default-features$' \
+    'cargo test --no-default-features'
+
+  check_matches_sample \
+    "all features test command pattern" \
+    '^cargo test --all-features$' \
+    'cargo test --all-features'
+
+  check_matches_sample \
     "rustdoc warnings command pattern" \
     '^RUSTDOCFLAGS="-D warnings" cargo doc --no-deps$' \
     'RUSTDOCFLAGS="-D warnings" cargo doc --no-deps'
@@ -218,9 +274,24 @@ if [[ "${1:-}" == "--self-test" ]]; then
     'scripts/release-gate-shape-scan.sh'
 
   check_matches_sample \
-    "cargo package list smoke command pattern" \
-    '^cargo package --list --allow-dirty >/dev/null$' \
-    'cargo package --list --allow-dirty >/dev/null'
+    "main crate cargo package list smoke command pattern" \
+    '^cargo package -p asynqrs --list --allow-dirty >/dev/null$' \
+    'cargo package -p asynqrs --list --allow-dirty >/dev/null'
+
+  check_matches_sample \
+    "macro crate cargo package list smoke command pattern" \
+    '^cargo package -p asynqrs-macros --list --allow-dirty >/dev/null$' \
+    'cargo package -p asynqrs-macros --list --allow-dirty >/dev/null'
+
+  check_matches_sample \
+    "macro crate cargo package verification command pattern" \
+    '^cargo package -p asynqrs-macros --allow-dirty$' \
+    'cargo package -p asynqrs-macros --allow-dirty'
+
+  check_matches_sample \
+    "main crate cargo package verification command pattern" \
+    '^cargo package -p asynqrs --allow-dirty$' \
+    'cargo package -p asynqrs --allow-dirty'
 
   check_matches_sample \
     "Redis smoke preflight command pattern" \
@@ -340,11 +411,17 @@ if [[ "${1:-}" == "--self-test" ]]; then
   assert_release_gate_rejects_missing '/^buf lint$/d' "buf lint command"
   assert_release_gate_rejects_missing '/^cargo fmt --check$/d' "cargo fmt check command"
   assert_release_gate_rejects_missing '/^cargo clippy --all-targets -- -D warnings$/d' "clippy warnings denied command"
+  assert_release_gate_rejects_missing '/^cargo test -p asynqrs-macros$/d' "macro crate test command"
+  assert_release_gate_rejects_missing '/^cargo test --no-default-features$/d' "feature-disabled test command"
+  assert_release_gate_rejects_missing '/^cargo test --all-features$/d' "all-features test command"
   assert_release_gate_rejects_missing '/^scripts\/release-gate-shape-scan\.sh --self-test$/d' "shape scan self-test command"
   assert_release_gate_rejects_missing '/^scripts\/release-gate-shape-scan\.sh$/d' "shape scan command"
   assert_release_gate_rejects_missing '/^scripts\/release-metadata-scan\.sh --self-test$/d' "release metadata scan self-test command"
   assert_release_gate_rejects_missing '/^scripts\/release-metadata-scan\.sh$/d' "release metadata scan command"
-  assert_release_gate_rejects_missing '/^cargo package --list --allow-dirty >\/dev\/null$/d' "cargo package list smoke command"
+  assert_release_gate_rejects_missing '/^cargo package -p asynqrs --list --allow-dirty >\/dev\/null$/d' "main cargo package list smoke command"
+  assert_release_gate_rejects_missing '/^cargo package -p asynqrs-macros --list --allow-dirty >\/dev\/null$/d' "macro cargo package list smoke command"
+  assert_release_gate_rejects_missing '/^cargo package -p asynqrs-macros --allow-dirty$/d' "macro cargo package verification command"
+  assert_release_gate_rejects_missing '/^cargo package -p asynqrs --allow-dirty$/d' "main cargo package verification command"
   assert_release_gate_rejects_missing '/^scripts\/docs-set-scan\.sh --self-test$/d' "docs set scan self-test command"
   assert_release_gate_rejects_missing '/^scripts\/docs-set-scan\.sh$/d' "docs set scan command"
   assert_release_gate_rejects_missing '/^scripts\/public-api-scan\.sh --self-test$/d' "public API scan self-test command"
@@ -355,15 +432,19 @@ if [[ "${1:-}" == "--self-test" ]]; then
   assert_release_gate_rejects_missing '/^scripts\/redis-smoke-preflight\.sh$/d' "Redis preflight command"
   assert_release_gate_rejects_missing '/^cargo test broker::redis::tests:: -- --nocapture --test-threads=1$/d' "strict Redis smoke command"
   assert_release_gate_rejects_missing '/^cargo test --examples$/d' "examples command"
+  assert_release_gate_rejects_missing '/^cargo test --examples --all-features$/d' "all-feature examples command"
   assert_release_gate_rejects_missing '/^cargo test --doc$/d' "doctest command"
   assert_release_gate_rejects_missing '/^RUSTDOCFLAGS="-D warnings" cargo doc --no-deps$/d' "rustdoc warnings command"
   assert_release_gate_rejects_missing '/^cargo test --quiet$/d' "full test suite command"
   assert_release_gate_rejects_missing '/^git diff --check$/d' "whitespace diff check"
   assert_release_gate_rejects_order 'cargo fmt --check' 'cargo clippy --all-targets -- -D warnings' "fmt before clippy"
   assert_release_gate_rejects_order 'cargo clippy --all-targets -- -D warnings' 'scripts/release-gate-shape-scan.sh --self-test' "clippy before release shape scans"
-  assert_release_gate_rejects_order 'cargo package --list --allow-dirty >/dev/null' 'scripts/redis-smoke-preflight.sh' "package smoke before Redis preflight"
+  assert_release_gate_rejects_order 'cargo test --all-features' 'scripts/release-gate-shape-scan.sh --self-test' "feature checks before release shape scans"
+  assert_release_gate_rejects_order 'cargo package -p asynqrs --allow-dirty' 'scripts/redis-smoke-preflight.sh' "package verification before Redis preflight"
+  assert_release_gate_rejects_order 'cargo package -p asynqrs-macros --allow-dirty' 'cargo package -p asynqrs --allow-dirty' "macro package before main package"
   assert_release_gate_rejects_order 'scripts/redis-smoke-preflight.sh' 'cargo test broker::redis::tests:: -- --nocapture --test-threads=1' "Redis preflight before strict Redis smoke"
   assert_release_gate_rejects_order 'cargo test broker::redis::tests:: -- --nocapture --test-threads=1' 'cargo test --examples' "strict Redis smoke before examples"
+  assert_release_gate_rejects_order 'cargo test --examples' 'cargo test --examples --all-features' "default examples before all-feature examples"
   assert_release_gate_rejects_order 'cargo test --doc' 'RUSTDOCFLAGS="-D warnings" cargo doc --no-deps' "doctests before rustdoc"
   assert_release_gate_rejects_order 'RUSTDOCFLAGS="-D warnings" cargo doc --no-deps' 'cargo test --quiet' "rustdoc before full tests"
   assert_final_gate_rejects_missing '/^for pass in 1 2; do$/d' "final gate two-pass loop"

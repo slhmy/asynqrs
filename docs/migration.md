@@ -37,6 +37,74 @@ client.close()?;
 
 Reference: Asynq v0.26.0 `Client.Enqueue`.
 
+## Define a Typed Payload
+
+Compiled example: [`examples/typed_payload.rs`](../examples/typed_payload.rs).
+
+Typed payload macros are an optional Rust-native convenience layer. They reduce
+manual task type and JSON payload boilerplate while still producing ordinary
+`Task` values. The derive path requires both `macros` and `serde`; manual
+`TypedTaskPayload` implementations can be used without either feature.
+
+```rust
+use asynqrs::{TaskPayload, TypedTaskPayload};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, TaskPayload)]
+#[task_type = "email:welcome"]
+struct WelcomeEmail {
+    user_id: u64,
+}
+
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
+let task = WelcomeEmail { user_id: 42 }.into_task()?;
+assert_eq!(task.task_type(), WelcomeEmail::TASK_TYPE);
+# Ok(())
+# }
+```
+
+Reference: Asynq v0.26.0 `NewTask`; typed payload derives are a Rust-native
+ergonomic layer over the same task type and payload bytes.
+
+## Register a Typed Handler
+
+Compiled example:
+[`examples/macro_handlers.rs`](../examples/macro_handlers.rs).
+
+Typed handlers decode task payload bytes before calling user code while keeping
+ordinary `ServeMux` routing, middleware, cancellation, deadline, and retry
+metadata behavior.
+
+```rust
+use asynqrs::{
+    HandlerError, ProcessingContext, TaskPayload, TypedTaskPayload, serve_mux,
+};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, TaskPayload)]
+#[task_type = "email:welcome"]
+struct WelcomeEmail {
+    user_id: u64,
+}
+
+fn handle_welcome(
+    payload: WelcomeEmail,
+    context: &ProcessingContext,
+) -> Result<(), HandlerError> {
+    assert_eq!(payload.user_id, 42);
+    assert_eq!(context.queue_name(), "critical");
+    Ok(())
+}
+
+let mux = serve_mux! {
+    WelcomeEmail => handle_welcome,
+};
+```
+
+Decode failures are mapped to `HandlerError::Failed` with the typed task name in
+the message. The same handler can also be registered without macros through
+`ServeMux::handle_typed` or `ServeMux::route_typed`.
+
 ## Run a Server
 
 Compiled example: [`examples/server.rs`](../examples/server.rs).
