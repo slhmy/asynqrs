@@ -1,0 +1,14 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  ignore_only:
+    PACKAGE_DIRECTORY_MATCH:
+      - proto/asynq.proto
+    PACKAGE_VERSION_SUFFIX:
+      - proto/asynq.proto
+breaking:
+  use:
+    - FILE

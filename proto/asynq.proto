@@ -1,0 +1,117 @@
+// Copyright 2020 Kentaro Hibino. All rights reserved.
+// Use of this source code is governed by a MIT license
+// that can be found in the LICENSE file.
+//
+syntax = "proto3";
+
+package asynq;
+
+import "google/protobuf/timestamp.proto";
+
+// Source: https://github.com/hibiken/asynq/blob/v0.26.0/internal/proto/asynq.proto#L7
+option go_package = "github.com/hibiken/asynq/internal/proto";
+
+// TaskMessage is the internal representation of a task with additional
+// metadata fields.
+// Next ID: 16
+// Source: https://github.com/hibiken/asynq/blob/v0.26.0/internal/proto/asynq.proto#L12-L71
+message TaskMessage {
+  // Type indicates the kind of the task to be performed.
+  string type = 1;
+
+  // Payload holds data needed to process the task.
+  bytes payload = 2;
+
+  // Headers holds additional metadata for the task.
+  map<string, string> headers = 15;
+
+  // Unique identifier for the task.
+  string id = 3;
+
+  // Name of the queue to which this task belongs.
+  string queue = 4;
+
+  // Max number of retries for this task.
+  int32 retry = 5;
+
+  // Number of times this task has been retried so far.
+  int32 retried = 6;
+
+  // Error message from the last failure.
+  string error_msg = 7;
+
+  // Time of last failure in Unix time,
+  // the number of seconds elapsed since January 1, 1970 UTC.
+  // Use zero to indicate no last failure.
+  int64 last_failed_at = 11;
+
+  // Timeout specifies timeout in seconds.
+  // Use zero to indicate no timeout.
+  int64 timeout = 8;
+
+  // Deadline specifies the deadline for the task in Unix time,
+  // the number of seconds elapsed since January 1, 1970 UTC.
+  // Use zero to indicate no deadline.
+  int64 deadline = 9;
+
+  // UniqueKey holds the redis key used for uniqueness lock for this task.
+  // Empty string indicates that no uniqueness lock was used.
+  string unique_key = 10;
+
+  // GroupKey is a name of the group used for task aggregation.
+  // This field is optional and empty value means no aggregation for the task.
+  string group_key = 14;
+
+  // Retention period specified in a number of seconds.
+  // The task will be stored in redis as a completed task until the TTL
+  // expires.
+  int64 retention = 12;
+
+  // Time when the task completed in success in Unix time,
+  // the number of seconds elapsed since January 1, 1970 UTC.
+  // This field is populated if result_ttl > 0 upon completion.
+  int64 completed_at = 13;
+}
+
+// Source: https://github.com/hibiken/asynq/blob/v0.26.0/internal/proto/asynq.proto#L97-L113
+message ServerInfo {
+  string host = 1;
+  int32 pid = 2;
+  string server_id = 3;
+  int32 concurrency = 4;
+  map<string, int32> queues = 5;
+  bool strict_priority = 6;
+  string status = 7;
+  google.protobuf.Timestamp start_time = 8;
+  int32 active_worker_count = 9;
+}
+
+// Source: https://github.com/hibiken/asynq/blob/v0.26.0/internal/proto/asynq.proto#L115-L137
+message WorkerInfo {
+  string host = 1;
+  int32 pid = 2;
+  string server_id = 3;
+  string task_id = 4;
+  string task_type = 5;
+  bytes task_payload = 6;
+  string queue = 7;
+  google.protobuf.Timestamp start_time = 8;
+  google.protobuf.Timestamp deadline = 9;
+}
+
+// Source: https://github.com/hibiken/asynq/blob/v0.26.0/internal/proto/asynq.proto#L139-L147
+message SchedulerEntry {
+  string id = 1;
+  string spec = 2;
+  string task_type = 3;
+  bytes task_payload = 4;
+  repeated string enqueue_options = 5;
+  google.protobuf.Timestamp next_enqueue_time = 6;
+  google.protobuf.Timestamp prev_enqueue_time = 7;
+}
+
+// Source: https://github.com/hibiken/asynq/blob/v0.26.0/internal/proto/asynq.proto#L163-L171
+message SchedulerEnqueueEvent {
+  string task_id = 1;
+  google.protobuf.Timestamp enqueue_time = 2;
+}

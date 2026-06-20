@@ -1,0 +1,150 @@
+use crate::broker::redis::RedisScript;
+
+use super::super::sources::*;
+use super::super::{RedisScriptArgShape, RedisScriptSpec};
+
+pub(super) const fn spec(script: RedisScript) -> RedisScriptSpec {
+    match script {
+        RedisScript::DeleteQueue => RedisScriptSpec::new(
+            script,
+            "delete_queue",
+            DELETE_QUEUE_SOURCE,
+            6,
+            RedisScriptArgShape::Exact(1),
+        ),
+        RedisScript::DeleteQueueForce => RedisScriptSpec::new(
+            script,
+            "delete_queue_force",
+            DELETE_QUEUE_FORCE_SOURCE,
+            6,
+            RedisScriptArgShape::Exact(1),
+        ),
+        RedisScript::DeleteTask => RedisScriptSpec::new(
+            script,
+            "delete_task",
+            DELETE_TASK_SOURCE,
+            2,
+            RedisScriptArgShape::Exact(3),
+        ),
+        RedisScript::RunTask => RedisScriptSpec::new(
+            script,
+            "run_task",
+            RUN_TASK_SOURCE,
+            3,
+            RedisScriptArgShape::Exact(3),
+        ),
+        RedisScript::ArchiveTask => RedisScriptSpec::new(
+            script,
+            "archive_task",
+            ARCHIVE_TASK_SOURCE,
+            3,
+            RedisScriptArgShape::Exact(6),
+        ),
+        RedisScript::UpdateTaskPayload => RedisScriptSpec::new(
+            script,
+            "update_task_payload",
+            UPDATE_TASK_PAYLOAD_SOURCE,
+            1,
+            RedisScriptArgShape::Exact(1),
+        ),
+        RedisScript::CurrentQueueStats => RedisScriptSpec::new(
+            script,
+            "current_queue_stats",
+            CURRENT_QUEUE_STATS_SOURCE,
+            12,
+            RedisScriptArgShape::Exact(2),
+        ),
+        RedisScript::QueueMemoryUsage => RedisScriptSpec::new(
+            script,
+            "queue_memory_usage",
+            QUEUE_MEMORY_USAGE_SOURCE,
+            7,
+            RedisScriptArgShape::Exact(4),
+        ),
+        RedisScript::HistoricalQueueStats => RedisScriptSpec::new(
+            script,
+            "historical_queue_stats",
+            HISTORICAL_QUEUE_STATS_SOURCE,
+            0,
+            RedisScriptArgShape::Exact(0),
+        ),
+        RedisScript::GroupStats => RedisScriptSpec::new(
+            script,
+            "group_stats",
+            GROUP_STATS_SOURCE,
+            1,
+            RedisScriptArgShape::Exact(1),
+        ),
+        RedisScript::TaskInfo => RedisScriptSpec::new(
+            script,
+            "task_info",
+            TASK_INFO_SOURCE,
+            1,
+            RedisScriptArgShape::Exact(3),
+        ),
+        RedisScript::ListTasks => RedisScriptSpec::new(
+            script,
+            "list_tasks",
+            LIST_TASKS_SOURCE,
+            1,
+            RedisScriptArgShape::Exact(4),
+        ),
+        RedisScript::RunAllTasks => RedisScriptSpec::new(
+            script,
+            "run_all_tasks",
+            RUN_ALL_TASKS_SOURCE,
+            2,
+            RedisScriptArgShape::Exact(1),
+        ),
+        RedisScript::ArchiveAllTasks => RedisScriptSpec::new(
+            script,
+            "archive_all_tasks",
+            ARCHIVE_ALL_TASKS_SOURCE,
+            2,
+            RedisScriptArgShape::Exact(4),
+        ),
+        RedisScript::ArchiveAllPendingTasks => RedisScriptSpec::new(
+            script,
+            "archive_all_pending_tasks",
+            ARCHIVE_ALL_PENDING_TASKS_SOURCE,
+            2,
+            RedisScriptArgShape::Exact(4),
+        ),
+        RedisScript::DeleteAllTasks => RedisScriptSpec::new(
+            script,
+            "delete_all_tasks",
+            DELETE_ALL_TASKS_SOURCE,
+            1,
+            RedisScriptArgShape::Exact(1),
+        ),
+        RedisScript::DeleteAllPendingTasks => RedisScriptSpec::new(
+            script,
+            "delete_all_pending_tasks",
+            DELETE_ALL_PENDING_TASKS_SOURCE,
+            1,
+            RedisScriptArgShape::Exact(1),
+        ),
+        RedisScript::RunAllAggregatingTasks => RedisScriptSpec::new(
+            script,
+            "run_all_aggregating_tasks",
+            RUN_ALL_AGGREGATING_TASKS_SOURCE,
+            3,
+            RedisScriptArgShape::Exact(2),
+        ),
+        RedisScript::ArchiveAllAggregatingTasks => RedisScriptSpec::new(
+            script,
+            "archive_all_aggregating_tasks",
+            ARCHIVE_ALL_AGGREGATING_TASKS_SOURCE,
+            3,
+            RedisScriptArgShape::Exact(5),
+        ),
+        RedisScript::DeleteAllAggregatingTasks => RedisScriptSpec::new(
+            script,
+            "delete_all_aggregating_tasks",
+            DELETE_ALL_AGGREGATING_TASKS_SOURCE,
+            2,
+            RedisScriptArgShape::Exact(2),
+        ),
+        _ => panic!("unsupported admin script"),
+    }
+}
