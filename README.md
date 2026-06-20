@@ -1,5 +1,8 @@
 # Asynqrs
 
+A production-shaped Redis task queue for Rust, aligned with Asynq's
+battle-tested model.
+
 Rust learning/reimplementation project for
 [hibiken/asynq](https://github.com/hibiken/asynq), a Go Redis-backed task queue.
 
